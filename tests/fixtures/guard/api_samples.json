@@ -1,0 +1,283 @@
+{
+ "_about": "Trimmed real api.dtf.ru answers (2026-09-28): deleted/frozen accounts, placeholder posts, comment placeholders. Author names of live accounts are replaced.",
+ "profile_deleted": {
+  "id": 123711,
+  "name": "Аккаунт удален",
+  "nickname": null,
+  "uri": "",
+  "type": 1,
+  "created": 1552921065,
+  "isFrozen": false,
+  "isRemovedByUserRequest": true,
+  "avatar": {
+   "type": "image",
+   "data": {
+    "uuid": "fe72d5ec-359a-572d-8b04-764e67663332",
+    "width": 160,
+    "height": 160,
+    "size": 1,
+    "type": "png",
+    "color": "",
+    "hash": "",
+    "external_service": []
+   }
+  },
+  "counters": {
+   "subscribers": 488,
+   "subscriptions": 0,
+   "achievements": 0,
+   "collectibles": 0,
+   "entries": 1,
+   "comments": 1
+  },
+  "description": ""
+ },
+ "profile_frozen": {
+  "id": 58358,
+  "name": "Аккаунт заморожен",
+  "nickname": null,
+  "uri": "",
+  "type": 1,
+  "created": 1523710344,
+  "isFrozen": true,
+  "isRemovedByUserRequest": false,
+  "avatar": {
+   "type": "image",
+   "data": {
+    "uuid": "8e95d9d3-932c-5f85-8b53-43da2e8ccaeb",
+    "width": 160,
+    "height": 160,
+    "size": 1,
+    "type": "png",
+    "color": "",
+    "hash": "",
+    "external_service": []
+   }
+  },
+  "counters": {
+   "subscribers": 15,
+   "subscriptions": 92,
+   "achievements": 5,
+   "collectibles": 5,
+   "entries": 1,
+   "comments": 1
+  },
+  "description": ""
+ },
+ "post_removed_by_request": {
+  "id": 1144808,
+  "title": "Статья удалена",
+  "date": 1648975207,
+  "dateModified": 1648975207,
+  "blocks": [
+   {
+    "id": "1",
+    "type": "text",
+    "data": {
+     "text": "Этот материал был удалён по просьбе автора."
+    },
+    "cover": true,
+    "hidden": false,
+    "anchor": ""
+   }
+  ],
+  "isRemovedByUserRequest": true,
+  "isPublished": false,
+  "counters": {
+   "comments": 0,
+   "favorites": 0,
+   "reposts": 0,
+   "online": 0,
+   "views": 0,
+   "hits": 0,
+   "reads": 0,
+   "shares": 0,
+   "reactions": 0,
+   "timespent": 0,
+   "total": 1660
+  },
+  "author": {
+   "id": 123711,
+   "name": "Аккаунт удален",
+   "nickname": null,
+   "isFrozen": false,
+   "isRemovedByUserRequest": true
+  }
+ },
+ "post_wiped_by_edit": {
+  "id": 2936197,
+  "title": "Статья удалена",
+  "date": 1724470923,
+  "dateModified": 1754462950,
+  "blocks": [
+   {
+    "type": "text",
+    "cover": true,
+    "hidden": false,
+    "anchor": "",
+    "data": {
+     "text": "<p>статья удалена</p>"
+    }
+   }
+  ],
+  "isRemovedByUserRequest": false,
+  "isPublished": true,
+  "counters": {
+   "comments": 364,
+   "favorites": 73,
+   "reposts": 0,
+   "online": 0,
+   "views": 0,
+   "hits": 0,
+   "reads": 0,
+   "shares": 0,
+   "reactions": 0,
+   "timespent": 0,
+   "total": 66007
+  },
+  "author": {
+   "id": 127035,
+   "name": "Автор",
+   "nickname": "author",
+   "isFrozen": false,
+   "isRemovedByUserRequest": false
+  }
+ },
+ "timeline_item_removed": {
+  "id": 1144808,
+  "title": "Статья удалена",
+  "date": 1648975207,
+  "dateModified": 1648975207,
+  "blocks": [
+   {
+    "id": "1",
+    "type": "text",
+    "data": {
+     "text": "Этот материал был удалён по просьбе автора."
+    },
+    "cover": true,
+    "hidden": false,
+    "anchor": ""
+   }
+  ],
+  "isRemovedByUserRequest": true,
+  "isPublished": false,
+  "counters": {
+   "comments": 0,
+   "favorites": 0,
+   "reposts": 0,
+   "online": 0,
+   "views": 0,
+   "hits": 0,
+   "reads": 0,
+   "shares": 0,
+   "reactions": 0,
+   "timespent": 0,
+   "total": 1660
+  },
+  "author": {
+   "id": 123711,
+   "name": "Аккаунт удален",
+   "nickname": null,
+   "isFrozen": false,
+   "isRemovedByUserRequest": true
+  }
+ },
+ "comments": {
+  "moderator": {
+   "id": 16388747,
+   "date": 1649123241,
+   "text": "Комментарий удалён модератором",
+   "media": [],
+   "replyTo": 16380299,
+   "level": 6,
+   "isRemoved": true,
+   "isRemovedByModerator": true,
+   "isHiddenByBan": false,
+   "isEdited": false,
+   "author": {
+    "id": 245506,
+    "name": "Автор",
+    "nickname": "author",
+    "isFrozen": false,
+    "isRemovedByUserRequest": false
+   }
+  },
+  "post_author": {
+   "id": 22509332,
+   "date": 1675716041,
+   "text": "Комментарий удалён автором поста",
+   "media": [],
+   "replyTo": 22509325,
+   "level": 1,
+   "isRemoved": true,
+   "isRemovedByModerator": false,
+   "isHiddenByBan": false,
+   "isEdited": false,
+   "author": {
+    "id": -1,
+    "name": "Автор",
+    "nickname": "author",
+    "isFrozen": false,
+    "isRemovedByUserRequest": false
+   }
+  },
+  "author_deleted": {
+   "id": 15737658,
+   "date": 1645463345,
+   "text": "Комментарий недоступен",
+   "media": [],
+   "replyTo": 0,
+   "level": 0,
+   "isRemoved": false,
+   "isRemovedByModerator": false,
+   "isHiddenByBan": false,
+   "isEdited": true,
+   "author": {
+    "id": 123711,
+    "name": "Аккаунт удален",
+    "nickname": null,
+    "isFrozen": false,
+    "isRemovedByUserRequest": true
+   }
+  },
+  "author_frozen": {
+   "id": 20865817,
+   "date": 1670439286,
+   "text": "Комментарий недоступен",
+   "media": [],
+   "replyTo": 20865381,
+   "level": 3,
+   "isRemoved": false,
+   "isRemovedByModerator": false,
+   "isHiddenByBan": false,
+   "isEdited": false,
+   "author": {
+    "id": 58358,
+    "name": "Аккаунт заморожен",
+    "nickname": null,
+    "isFrozen": true,
+    "isRemovedByUserRequest": false
+   }
+  },
+  "unavailable_no_flags": {
+   "id": 17669859,
+   "date": 1656854067,
+   "text": "Комментарий недоступен",
+   "media": [],
+   "replyTo": 17669797,
+   "level": 3,
+   "isRemoved": false,
+   "isRemovedByModerator": false,
+   "isHiddenByBan": false,
+   "isEdited": false,
+   "author": {
+    "id": 46807,
+    "name": "Автор",
+    "nickname": "author",
+    "isFrozen": false,
+    "isRemovedByUserRequest": false
+   }
+  }
+ }
+}

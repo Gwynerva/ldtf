@@ -1,0 +1,16 @@
+# personal data: archives, media, app state and logs
+archive/
+
+# embedded Python for Windows: ships in release zips, not in the repository
+runtime/
+
+__pycache__/
+*.pyc
+# local tool settings
+.claude/
+
+# demo archives for screenshots and the DTF post (someone else's public profile)
+demo-library/
+
+# materials for the DTF announcement (screenshots of someone else's public profile)
+promo/
