@@ -95,7 +95,11 @@ def add_page(app: "App", value: str = "", preview: dict | None = None, error: st
         av = ((preview.get("avatar") or {}).get("data") or {}).get("uuid")
         img = avatar(f"https://leonardo.osnova.io/{av}/-/scale_crop/128x128/" if av else None, lazy=False)
         exists = (app.library / folder).exists()
+        from ..guard import account_problem
+        gone = account_problem(preview)
         action = (btn("Открыть архив", ic="inventory_2", href=Links(folder).home()) if exists else
+                  banner("err", "DTF сообщает, что этот аккаунт " + ("удалён" if gone == "deleted" else "заморожен")
+                         + ": его посты и комментарии заменены заглушками, архивировать нечего.") if gone else
                   app.shell.form("/add", f'<input type="hidden" name="action" value="create">'
                                          f'<input type="hidden" name="user" value="{E(str(preview.get("id")))}">'
                                          + btn("Создать архив", ic="add")))
@@ -107,7 +111,7 @@ def add_page(app: "App", value: str = "", preview: dict | None = None, error: st
               f'{plural(subs, "подписчик", "подписчика", "подписчиков")}</span>'
               f'<span class="chip">{icon("calendar_month")}на DTF с {ts_date(preview.get("created"))}</span></div>'
               f'{f"<p class=pv-desc>{E(desc)}</p>" if desc else "<p></p>"}{action}</div></div>'
-              + ("" if exists else f'<p class="muted small">Первая выгрузка активного пользователя занимает от нескольких '
+              + ("" if exists or gone else f'<p class="muted small">Первая выгрузка активного пользователя занимает от нескольких '
                                    f'минут до пары часов; её можно прерывать и продолжать.</p>'))
     body = (page_head("Добавить пользователя", "Посты, комментарии со всего сайта с контекстом обсуждений и медиафайлы. "
                                                "Только публичные данные.")

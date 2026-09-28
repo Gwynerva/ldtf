@@ -71,8 +71,9 @@ def delegate(running: dict, arch: Archive, args: argparse.Namespace) -> int:
                 call(f"/api/jobs/{job['id']}/cancel", {})
                 print("Останавливаю… прогресс сохраняется")
             continue
-        run = next((st for st in j["stages"] if st.get("status") == "running"), None)
-        line = f"{j['state']}: {run['title']} {run.get('pct', '')}%" if run else j["state"]
+        run = next((st for st in j["stages"] if st.get("status") == "running"), None) if j["state"] == "running" else None
+        pct = f" {run['pct']:.0f}%" if run and run.get("pct") is not None else ""
+        line = f"{j['state']}: {run['title']}{pct}" if run else j["state"]
         if line != last:
             print(line)
             last = line

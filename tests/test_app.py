@@ -275,6 +275,28 @@ class AppTest(unittest.TestCase):
             save_settings(self.arch.settings_path, settings)
             self.app.invalidate()
 
+    def test_broken_view_does_not_break_the_app(self) -> None:
+        bad = self.library / "broken"
+        (bad / ".state").mkdir(parents=True)
+        (bad / ".state" / "state.sqlite").write_bytes(b"")
+        (bad / ".state" / "view.sqlite").write_bytes(b"")          # e.g. created empty by some other tool
+        self.app.invalidate()
+        try:
+            for p in ("/archives", "/u/tester/", "/u/broken/sync"):
+                self.assertEqual(self.get(p)[0], 200, p)
+        finally:
+            import shutil
+            shutil.rmtree(bad, ignore_errors=True)
+            self.app.invalidate()
+
+    def test_add_deleted_account(self) -> None:
+        import json as _json
+        from dtf_backup.web.app_pages import add_page
+        sample = _json.loads((Path(__file__).parent / "fixtures" / "guard" / "api_samples.json").read_text(encoding="utf-8"))
+        page = add_page(self.app, "123711", preview=sample["profile_deleted"])
+        self.assertIn("архивировать нечего", page)
+        self.assertNotIn("Создать архив", page)
+
     def test_job_api_needs_token(self) -> None:
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/jobs", data=b'{"nick": "tester"}',
                                      headers={"Content-Type": "application/json"})

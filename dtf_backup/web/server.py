@@ -31,7 +31,7 @@ from ..netpool import NetPool
 from ..scheduler import Scheduler, next_run
 from ..state import Archive, archive_dirs, peek_meta
 from ..util import log, read_json_gz, write_json
-from ..viewdb import open_view, view_meta
+from ..viewdb import open_view, view_meta, view_ready
 from . import app_pages, viewer
 from .jobs import JobManager
 from .ui import ASSETS, Links, Shell, avatar_src, btn, empty_state
@@ -148,7 +148,7 @@ class App:
 
     def view(self, nick: str) -> viewer.ArchiveView | None:
         arch = self.archive(nick)
-        if arch is None or not arch.view_path.exists():
+        if arch is None or not view_ready(arch):
             return None
         cfg = arch.root / "reactions.config.json"
         stamp = (arch.view_path.stat().st_mtime, cfg.stat().st_mtime if cfg.exists() else 0)

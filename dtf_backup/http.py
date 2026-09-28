@@ -13,10 +13,12 @@
 
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import http.client
 import json
+import socket
 import ssl
 import threading
 import time
@@ -216,9 +218,19 @@ def _retry_after(headers: dict[str, str]) -> float | None:
         return None
 
 
+# "No network at all" (vs a slow or blocking server): the name does not resolve or there is no route.
+OFFLINE_ERRNOS = {errno.ENETUNREACH, errno.EHOSTUNREACH, 10051, 10065}   # + WSAENETUNREACH, WSAEHOSTUNREACH
+OFFLINE_TRIES = 3
+
+
+def is_offline_error(e: BaseException) -> bool:
+    return isinstance(e, socket.gaierror) or (isinstance(e, OSError) and e.errno in OFFLINE_ERRNOS)
+
+
 class HttpClient:
     def __init__(self, limiters: dict[str, Any], timeout: float = 40.0,
                  attempts: int = 8, extra_headers: dict[str, str] | None = None):
+        self.offline_wait = 5.0   # between the few quick checks before giving up without a network
         self.limiters = limiters
         self.timeout = timeout
         self.attempts = attempts
@@ -301,11 +313,21 @@ class HttpClient:
         host = urllib.parse.urlsplit(url).netloc
         limiter = self._limiter(host)
         last_exc: Exception | None = None
+        offline = 0
         for attempt in range(1, self.attempts + 1):
             limiter.acquire()
             try:
                 r = self._exchange(url, headers or {}, sink)
             except (OSError, http.client.HTTPException, ssl.SSLError, EOFError, ValueError, zlib.error) as e:
+                if is_offline_error(e):
+                    # no network at all: say so in seconds instead of backing off for half an hour, and do not
+                    # slow down the shared budget (the server is not the problem)
+                    limiter.release(True)
+                    offline += 1
+                    if offline >= OFFLINE_TRIES:
+                        raise FatalNetworkError(f"нет подключения к интернету ({host}: {e})") from None
+                    time.sleep(self.offline_wait)
+                    continue
                 limiter.release(False, reason=f"{type(e).__name__}: {e}"[:160])
                 last_exc = e
                 if on_retry:

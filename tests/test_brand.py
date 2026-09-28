@@ -1,5 +1,6 @@
 """LDTF icon files and the Windows autostart command (offline, nothing is written to the registry)."""
 
+import os
 import struct
 import sys
 import unittest
@@ -40,6 +41,7 @@ class IconsTest(unittest.TestCase):
 
 
 class WinIntegrationTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows autostart")
     def test_autostart_command(self) -> None:
         cmd = winintegration.command(background=True)
         self.assertIn("pythonw", cmd.lower())

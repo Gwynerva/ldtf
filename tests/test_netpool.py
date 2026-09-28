@@ -20,9 +20,26 @@ def hammer(lease, counter, key, until, hold=0.0):
             lease.acquire()
         except FatalNetworkError:
             return
+        if time.monotonic() >= until:   # a permit granted after the window does not count (precise timers on Linux)
+            lease.release(True)
+            return
         counter[key] = counter.get(key, 0) + 1
         time.sleep(hold)
         lease.release(True)
+
+
+class OfflineTest(unittest.TestCase):
+    def test_no_network_fails_fast(self) -> None:
+        from dtf_backup.http import HttpClient
+        lim = AdaptiveLimiter("api", 2, rate=10)
+        client = HttpClient({"*": lim}, timeout=5)
+        client.offline_wait = 0.05
+        t0 = time.monotonic()
+        with self.assertRaises(FatalNetworkError) as cm:
+            client.fetch("https://ldtf-test-host.invalid/")   # .invalid never resolves
+        self.assertIn("нет подключения", str(cm.exception))
+        self.assertLess(time.monotonic() - t0, 20)
+        self.assertEqual((lim.fail_streak, lim.backoff_until), (0, 0.0))   # the shared budget is not punished
 
 
 class NetPoolTest(unittest.TestCase):

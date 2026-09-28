@@ -135,7 +135,9 @@ class FakeDtf:
             cid += 1
             root = {"id": cid, "date": T0 + 86400 + j * 600, "text": f"Корень чужой ветки {j}, о чём-то спорном",
                     "author": {"id": 700 + j, "name": f"Собеседник {j}"}, "replyTo": 0, "level": 0,
-                    "threadId": f"r{cid}", "entry": {"id": eid}}
+                    "threadId": f"r{cid}", "entry": {"id": eid},
+                    "media": [{"type": "image", "data": {"uuid": f"00000000-0000-4000-8000-{j:012d}", "type": "jpg",
+                                                         "width": 10, "height": 10, "size": 100}}]}
             cid += 1
             mine = {"id": cid, "date": T0 + 86400 + j * 600 + 60, "text": f"Мой подробный ответ в чужой ветке номер {j}, с аргументами",
                     "author": {"id": UID}, "replyTo": root["id"], "level": 1, "replyCount": 0, "threadId": f"r{root['id']}",
@@ -405,6 +407,15 @@ class GuardSyncTest(unittest.TestCase):
         hist = self.arch.raw_post_history(2, old_mod)
         self.assertTrue(hist.exists())
         self.assertEqual(len(read_json_gz(hist)["blocks"]), 1)
+
+    def test_context_media_is_queued(self) -> None:
+        # other people's pictures in the kept discussion branches are archived too (the app works offline)
+        arch = Archive(self.lib / "tester", self.lib)
+        s = Syncer(arch, None, no_media=True)
+        s._queue_from_raw()
+        n = arch.db.execute("SELECT COUNT(*) FROM media_use WHERE owner LIKE 'tc:%'").fetchone()[0]
+        arch.close()
+        self.assertEqual(n, 30)
 
     def test_guard_trip_is_an_exception_with_details(self) -> None:
         g = GuardTrip("posts-mass", "msg", {"lost": 3})

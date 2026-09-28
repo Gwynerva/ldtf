@@ -264,14 +264,15 @@ class JobManager:
             if job.kind == "sync":
                 s = arch.settings()
                 net = self.net
-                code = Syncer(arch, job.params.get("user") or arch.get_meta("user_ident") or job.nick,
+                syncer = Syncer(arch, job.params.get("user") or arch.get_meta("user_ident") or job.nick,
                               workers=net.api_conn if net else int(s["workers"]),
                               media_workers=net.media_conn if net else int(s["media_workers"]),
                               refresh_days=int(s["refresh_days"]), full=bool(job.params.get("full")),
                               no_media=not s["media"], rate=float(s["rate"]),
                               reporter=job.report, cancel=job.cancel,
                               net=net.lease() if net else None, name=prefix.rstrip("-"),
-                              accept=bool(job.params.get("accept"))).run()
+                              accept=bool(job.params.get("accept")))
+                code = syncer.run()
                 if code == 4:   # the archive guard stopped it: nothing to build, no retry until the user decides
                     g = arch.get_meta("guard") or {}
                     job.state = "blocked"
@@ -286,7 +287,9 @@ class JobManager:
                 if code == 3:
                     raise RuntimeError("с этим архивом уже работает другой процесс синхронизации")
                 if code == 2:
-                    job.error = "сеть недоступна или DTF ограничил запросы — прогресс сохранён, повторю позже"
+                    job.error = ("нет подключения к интернету — прогресс сохранён, повторю позже"
+                                 if "нет подключения" in syncer.fatal else
+                                 "сеть недоступна или DTF ограничил запросы — прогресс сохранён, повторю позже")
                 if not arch.raw_profile().exists():  # nothing downloaded yet: nothing to build
                     job.report("build", {"status": "skipped"})
                     job.state = "error"

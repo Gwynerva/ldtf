@@ -383,11 +383,27 @@ def _replace(tmp: Path, final: Path) -> None:
 
 
 def open_view(arch: Archive) -> sqlite3.Connection | None:
+    """The built view, or None when there is none yet — or the file is empty/damaged (then the archive just looks
+    unbuilt and the next render replaces it, instead of one bad file breaking every page of the app)."""
     if not arch.view_path.exists():
         return None
-    db = sqlite3.connect(f"file:{arch.view_path.as_posix()}?mode=ro", uri=True, timeout=30, check_same_thread=False)
-    db.row_factory = sqlite3.Row
-    return db
+    try:
+        db = sqlite3.connect(f"file:{arch.view_path.as_posix()}?mode=ro", uri=True, timeout=30, check_same_thread=False)
+        db.row_factory = sqlite3.Row
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() is None:
+            db.close()
+            return None
+        return db
+    except sqlite3.DatabaseError:
+        return None
+
+
+def view_ready(arch: Archive) -> bool:
+    db = open_view(arch)
+    if db is None:
+        return False
+    db.close()
+    return True
 
 
 def view_meta(db: sqlite3.Connection) -> dict:

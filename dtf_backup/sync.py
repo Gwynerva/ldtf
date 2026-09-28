@@ -76,6 +76,7 @@ class Syncer:
         self.site: Counter = Counter()      # what disappeared from DTF this run (kept in the archive)
         self.site_items: list[dict] = []    # the first of them, for the report
         self.ident_override: str | None = None
+        self.fatal = ""                     # why the network gave up (code 2)
         self._posts_lost: list[int] = []
         self._posts_limit = 3
         self._posts_archived = 0
@@ -151,6 +152,7 @@ class Syncer:
             log.error(f"Синхронизация остановлена: {g.message}")
         except FatalNetworkError as e:
             code = 2
+            self.fatal = str(e)
             log.error(f"Сеть недоступна или сервер блокирует запросы: {e}. "
                       f"Прогресс сохранён — просто запустите sync позже.")
         except (KeyboardInterrupt, Cancelled):
@@ -833,38 +835,41 @@ class Syncer:
         log.info(f"[контекст] готово: {dict(stats)}")
 
     # ------------------------------------------------------------------ media
-    def _queue_avatars(self) -> None:
-        """Small avatars of every comment author found in raw trees/threads (only files changed since last scan)."""
+    def _queue_from_raw(self) -> None:
+        """From raw trees/threads changed since the last scan: small avatars of every comment author, and the media of
+        other people's comments kept as context, so discussions show their pictures offline too."""
         a = self.arch
-        since = a.get_meta("avatars_scanned_mtime", 0)
+        since = a.get_meta("raw_scanned_mtime", 0)   # was avatars_scanned_mtime: a new key rescans once for context media
         newest = since
         seen: set[int] = set()
-        queued = 0
-        files = [p for d in ("post-trees", "threads") for p in (a.raw / d).glob("*.json.gz")]
-        for p in files:
-            mt = p.stat().st_mtime
-            if mt <= since:
-                continue
-            newest = max(newest, mt)
-            for c in read_json_gz(p).get("items", []):
-                au = c.get("author") or {}
-                uid = au.get("id")
-                if uid is None or uid in seen:
+        avatars = context = 0
+        for d in ("post-trees", "threads"):
+            for p in (a.raw / d).glob("*.json.gz"):
+                mt = p.stat().st_mtime
+                if mt <= since:
                     continue
-                seen.add(uid)
-                key = avatar_key(au.get("avatar"))
-                if key:
-                    queued += a.queue_media([(key, None, "jpg")], f"avatar:{uid}")
-        a.set_meta("avatars_scanned_mtime", newest)
+                newest = max(newest, mt)
+                for c in read_json_gz(p).get("items", []):
+                    if d == "threads" and c.get("media"):   # tree media are queued by the posts stage
+                        context += a.queue_media(collect_media(c["media"]), f"tc:{c.get('id')}")
+                    au = c.get("author") or {}
+                    uid = au.get("id")
+                    if uid is None or uid in seen:
+                        continue
+                    seen.add(uid)
+                    key = avatar_key(au.get("avatar"))
+                    if key:
+                        avatars += a.queue_media([(key, None, "jpg")], f"avatar:{uid}")
+        a.set_meta("raw_scanned_mtime", newest)
         a.commit()
-        if queued:
-            log.info(f"[медиа] аватарок авторов в очередь: +{queued}")
+        if avatars or context:
+            log.info(f"[медиа] в очередь: аватарок авторов +{avatars}, медиа из веток обсуждений +{context}")
 
     def stage_media(self, pool: ThreadPoolExecutor) -> None:
         a, db = self.arch, self.arch.db
         tmp = a.media / ".tmp" / a.nick
         shutil.rmtree(tmp, ignore_errors=True)  # partial downloads of this archive's interrupted run
-        self._queue_avatars()
+        self._queue_from_raw()
         self.report("media", status="running", phase="prepare")
         retry_missing = " OR r.status='missing'" if self.full else ""
         # only the keys this archive needs; files already fetched by other archives are skipped for free
