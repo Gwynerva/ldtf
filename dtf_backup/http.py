@@ -25,7 +25,7 @@ import time
 from collections import deque
 import urllib.parse
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -40,7 +40,12 @@ RETRIABLE_STATUS = {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 
 
 class FatalNetworkError(Exception):
-    """The network looks broken or we are blocked: stop and let the user resume later."""
+    """The network looks broken or we are blocked: stop and let the user resume later.
+    `offline`: there is no network at all (not DTF limiting us)."""
+
+    def __init__(self, message: str, offline: bool = False):
+        super().__init__(message)
+        self.offline = offline
 
 
 class HttpError(Exception):
@@ -159,16 +164,6 @@ class AdaptiveLimiter:
                             self.stopped = True
             self.cond.notify_all()
 
-    def configure(self, max_permits: int, rate: float | None = None) -> None:
-        """New limits from the app settings, applied to running syncs too."""
-        with self.cond:
-            self.max = max(1, max_permits)
-            self.limit = min(self.limit, self.max) if self.fail_streak else self.max
-            if rate:
-                self.rate = min(self.rate or rate, rate) if self.fail_streak else rate
-                self.max_rate = rate
-            self.cond.notify_all()
-
     def state(self) -> dict:
         with self.cond:
             now = time.monotonic()
@@ -205,7 +200,6 @@ class Response:
     body: bytes = b""
     sha256: str | None = None
     size: int = 0
-    extra: dict[str, Any] = field(default_factory=dict)
 
 
 def _retry_after(headers: dict[str, str]) -> float | None:
@@ -325,7 +319,7 @@ class HttpClient:
                     limiter.release(True)
                     offline += 1
                     if offline >= OFFLINE_TRIES:
-                        raise FatalNetworkError(f"нет подключения к интернету ({host}: {e})") from None
+                        raise FatalNetworkError(f"нет подключения к интернету ({host}: {e})", offline=True) from None
                     time.sleep(self.offline_wait)
                     continue
                 limiter.release(False, reason=f"{type(e).__name__}: {e}"[:160])
@@ -364,7 +358,7 @@ class HttpClient:
                 time.sleep(10 * (attempt + 1))
         raise HttpError(r.status, url, b"invalid JSON: " + r.body[:200])
 
-    def download(self, url: str, dest: Path, byte_range: str | None = None) -> Response:
+    def download(self, url: str, dest: Path) -> Response:
         """Stream a file to `dest` (overwritten), computing sha256 on the fly."""
         dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -392,10 +386,7 @@ class HttpClient:
             r.sha256 = h.hexdigest()
             r.size = size
 
-        headers = {"Accept": "*/*", "Accept-Encoding": "identity"}
-        if byte_range:
-            headers["Range"] = byte_range
-        return self.fetch(url, headers, sink=sink)
+        return self.fetch(url, {"Accept": "*/*", "Accept-Encoding": "identity"}, sink=sink)
 
     def fetch_range(self, url: str, byte_range: str) -> Response:
         """Small ranged GET kept in memory (for dedup probes)."""

@@ -24,7 +24,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from .stemmers import CYR_RE, LAT_RE, TOKEN_RE, norm, query_stems, stem_text, tokens, word_stems
 

@@ -13,9 +13,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .api import media_url
 from .media import raw_key
 from .normalize import MediaResolver
-from .util import write_json
+from .util import log, read_json_gz, write_json
 
 E = html.escape
 
@@ -56,7 +57,7 @@ def load_config(archive_root: Path) -> dict:
     path = archive_root / CONFIG_NAME
     cfg = {
         "_help": ("Какие реакции считать дизлайками (▼). Укажите id реакций; картинки и id — в data/reactions.json "
-                  "и на странице site/reactions.html. После правки запустите: dtf-backup render"),
+                  "и в LDTF: Управление архивом → Реакции (там же можно отметить их мышкой)."),
         "negative": DEFAULT_NEGATIVE,
     }
     if path.exists():
@@ -64,8 +65,8 @@ def load_config(archive_root: Path) -> dict:
             user = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(user.get("negative"), list):
                 cfg["negative"] = user["negative"]
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as e:
+            log.warning(f"{path} не читается ({e}) — дизлайками считаются реакции по умолчанию.")
     else:
         write_json(path, cfg)
     return cfg
@@ -77,6 +78,11 @@ class Reactions:
         self.report = report
         self.cat: dict[str, dict] = {str(x.get("id")): x for x in assets.get("reactions", []) if isinstance(x, dict)}
         self.negative = {str(i) for i in (config or {}).get("negative", DEFAULT_NEGATIVE)}
+
+    @classmethod
+    def for_archive(cls, arch: Any, resolver: MediaResolver, report: Any) -> "Reactions":
+        """The reaction catalog saved with the archive and its dislike settings (reactions.config.json)."""
+        return cls(read_json_gz(arch.raw_assets(), {}), resolver, report, load_config(arch.root))
 
     def is_negative(self, rid: Any) -> bool:
         return str(rid) in self.negative
@@ -91,7 +97,7 @@ class Reactions:
         if not key:
             return None
         loc = self.resolver.local(key)
-        return R + loc["path"] if loc else key if key.startswith("http") else f"https://leonardo.osnova.io/{key}/"
+        return R + loc["path"] if loc else media_url(key)
 
     def srcs(self, rid: Any, R: str) -> tuple[str | None, str | None]:
         """(static png, animated webp) — the animated original is fetched with -/format/raw/."""
@@ -100,18 +106,15 @@ class Reactions:
             return None, None
         return self._url(x.get("staticUuid"), R), self._url(raw_key(x.get("animatedUuid")), R)
 
-    def src(self, rid: Any, R: str) -> str | None:
-        st, an = self.srcs(rid, R)
-        return an or st
-
     def img(self, rid: Any, R: str, alt: str = "") -> str | None:
         st, an = self.srcs(rid, R)
         if not (st or an):
             return None
+        rem = ' data-remote="reaction"' if (an or st or "").startswith("http") else ""   # not in the archive: from DTF
         if an and st:  # animated, but static for people who prefer reduced motion
             return (f'<picture><source srcset="{E(st)}" media="(prefers-reduced-motion: reduce)">'
-                    f'<img src="{E(an)}" alt="{E(alt)}" loading="lazy"></picture>')
-        return f'<img src="{E(an or st)}" alt="{E(alt)}" loading="lazy">'
+                    f'<img src="{E(an)}" alt="{E(alt)}" loading="lazy"{rem}></picture>')
+        return f'<img src="{E(an or st)}" alt="{E(alt)}" loading="lazy"{rem}>'
 
     def split(self, pairs: list[tuple[Any, int]]) -> tuple[int, int]:
         pos = sum(n for rid, n in pairs if not self.is_negative(rid))

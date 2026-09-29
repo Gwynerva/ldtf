@@ -17,12 +17,11 @@ problems and mass losses raise `GuardTrip`: the sync stops before writing anythi
 from __future__ import annotations
 
 import math
-import re
 from collections import Counter
 from typing import Any
 
 from .normalize import html_to_text
-from .util import now_ts
+from .util import COMMENTS, POSTS, count_label, now_ts
 
 COMMENTS_LIMIT = 20            # own comments lost in one sync before it stops and asks
 ACCEPTABLE = ("posts-mass", "comments-mass")   # kinds the user may confirm; account problems can only be rechecked
@@ -46,6 +45,32 @@ KIND_TITLES = {
     "posts-mass": "на DTF пропало много постов",
     "comments-mass": "на DTF пропало много комментариев",
 }
+HINTS = {   # what the user can do, in the app (the sync tab's guard card)
+    "account-deleted": "Если аккаунт вернут, нажмите «Проверить снова». До тех пор архив остаётся как есть, а автосинхронизация "
+                       "для него не запускается.",
+    "account-frozen": "Заморозку могут снять — тогда нажмите «Проверить снова». До тех пор архив остаётся как есть, а "
+                      "автосинхронизация для него не запускается.",
+    "account-missing": "Возможно, аккаунт удалён или DTF временно отвечает с ошибками. Попробуйте «Проверить снова» позже.",
+    "posts-mass": "Если посты удалили вы сами или их убрала модерация, нажмите «Продолжить и сохранить удалённое»: они "
+                  "будут отмечены как удалённые на DTF, а в архиве останутся сохранённые версии. Если это сбой DTF, "
+                  "проверьте снова позже.",
+    "comments-mass": "Если комментарии удалили вы сами или модерация, нажмите «Продолжить и сохранить удалённое»: они "
+                     "будут отмечены как удалённые на DTF, а в архиве останутся сохранённые тексты. Если это сбой DTF, "
+                     "проверьте снова позже.",
+}
+CLI_HINT = ("Защита архива остановила синхронизацию, архив не изменён. Посмотрите подробности в LDTF (вкладка "
+            "«Синхронизация») или в `status`. Если материалы удалили вы сами или модерация, запустите "
+            "sync --accept-deletions: пропавшее будет отмечено, в архиве останутся сохранённые версии.")
+STOPPED = "синхронизация остановлена защитой архива"
+
+
+def title(kind: str | None) -> str:
+    """What stopped the sync, for headings: "аккаунт удалён на DTF"."""
+    return KIND_TITLES.get(kind or "", "нужна проверка")
+
+
+def hint(kind: str | None) -> str:
+    return HINTS.get(kind or "", "")
 
 
 class GuardTrip(Exception):
@@ -234,23 +259,9 @@ def site_summary(stats: dict | None) -> str:
     nc = sum(v for k, v in stats.items() if k.startswith("comments_"))
     nctx = stats.get("context", 0)
     if np_:
-        parts.append(plural(np_, "пост", "поста", "постов"))
+        parts.append(count_label(np_, *POSTS))
     if nc:
-        parts.append(plural(nc, "комментарий", "комментария", "комментариев"))
+        parts.append(count_label(nc, *COMMENTS))
     if nctx:
-        parts.append(plural(nctx, "чужой комментарий", "чужих комментария", "чужих комментариев") + " в ветках")
+        parts.append(count_label(nctx, "чужой комментарий", "чужих комментария", "чужих комментариев") + " в ветках")
     return ", ".join(parts)
-
-
-def plural(n: int, one: str, few: str, many: str) -> str:
-    n10, n100 = n % 10, n % 100
-    w = one if n10 == 1 and n100 != 11 else few if 2 <= n10 <= 4 and not 12 <= n100 <= 14 else many
-    return f"{n} {w}"
-
-
-_TAGS = re.compile(r"<[^>]+>")
-
-
-def short(text: str | None, n: int = 90) -> str:
-    t = " ".join(_TAGS.sub(" ", text or "").split())
-    return t[:n] + ("…" if len(t) > n else "")

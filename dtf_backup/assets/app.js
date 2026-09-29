@@ -28,12 +28,45 @@
   window.addEventListener("scroll", function () { if (!ticking) { ticking = true; requestAnimationFrame(onScroll); } }, { passive: true });
   onScroll();
 
-  // ---- menus on <details>: close on outside click / Esc
+  // ---- menus on <details>: anchored to their button with position: fixed, so no card, list or row clips or covers them;
+  // they open upwards near the bottom of the window, stay between the app bar and the bottom navigation, follow the
+  // page while it scrolls; outside click / Esc closes them
+  var MENUS = "details.acct[open], details.menu[open]";
+  function placeMenu(d) {
+    var pop = d.querySelector(":scope > .menu-pop"), btn = d.querySelector(":scope > summary");
+    if (!pop || !btn) return;
+    var r = btn.getBoundingClientRect(), vw = root.clientWidth, vh = window.innerHeight;
+    var bar = document.querySelector(".appbar"), nav = document.querySelector(".dest");
+    var top0 = d.closest(".appbar") || !bar ? 0 : bar.getBoundingClientRect().bottom;
+    var bottom0 = nav && getComputedStyle(nav).position === "fixed" ? nav.getBoundingClientRect().top : vh;
+    if (r.bottom < top0 || r.top > bottom0) { d.open = false; return; }   // its button scrolled away
+    pop.style.cssText = "position:fixed;top:0;left:0;right:auto;max-height:none";
+    var w = Math.min(pop.offsetWidth, vw - 16), h = pop.scrollHeight;
+    var left = d.classList.contains("right") ? r.right - w : r.left;
+    pop.style.left = Math.max(8, Math.min(left, vw - 8 - w)) + "px";
+    var below = bottom0 - r.bottom - 14, above = r.top - top0 - 14;
+    if (h <= below || below >= above) {
+      pop.style.top = (r.bottom + 6) + "px"; pop.style.maxHeight = Math.max(below, 96) + "px";
+    } else {
+      pop.style.top = Math.max(top0 + 8, r.top - 6 - Math.min(h, above)) + "px"; pop.style.maxHeight = above + "px";
+    }
+  }
+  function placeMenus() { document.querySelectorAll(MENUS).forEach(placeMenu); }
+  document.addEventListener("toggle", function (e) {   // toggle does not bubble: listen while capturing
+    var d = e.target;
+    if (d.matches && d.matches("details.acct, details.menu")) { if (d.open) placeMenu(d); else d.querySelector(":scope > .menu-pop").style.cssText = ""; }
+  }, true);
+  var placing = false;
+  function onMove() { if (!placing) { placing = true; requestAnimationFrame(function () { placing = false; placeMenus(); }); } }
+  window.addEventListener("scroll", onMove, { passive: true });
+  window.addEventListener("resize", onMove);
   document.addEventListener("click", function (e) {
-    document.querySelectorAll("details.acct[open], details.menu[open]").forEach(function (d) { if (!d.contains(e.target)) d.open = false; });
+    document.querySelectorAll(MENUS).forEach(function (d) { if (!d.contains(e.target)) d.open = false; });
+    var s = e.target.closest && e.target.closest("details.acct > summary, details.menu > summary");
+    if (s) requestAnimationFrame(function () { if (s.parentNode.open) placeMenu(s.parentNode); });   // before the first paint
   });
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") document.querySelectorAll("details.acct[open], details.menu[open]").forEach(function (d) { d.open = false; });
+    if (e.key === "Escape") document.querySelectorAll(MENUS).forEach(function (d) { d.open = false; });
   });
 
   // ---- comment threads: the line / "Свернуть" collapse a branch, "Развернуть ветку" opens it again
@@ -62,6 +95,51 @@
   }
   observe(document);
 
+  // ---- files that are not in the archive are shown from DTF (data-remote). When one fails to load (no network,
+  // the CDN is down, the file is gone), a placeholder of the same size takes its place. The failure itself is noted by
+  // a listener in <head> (data-failed), so pictures that failed before this script ran are covered too; files DTF
+  // already reported deleted come with data-failed="gone" and a placeholder from the server, and are never requested.
+  var stubTpl = document.getElementById("mstub");
+  function placeholder(el) {
+    if (el.matches("img.av, .ava")) {   // avatars: the person icon, as for accounts without a picture
+      var p = document.createElement("span");
+      p.className = el.classList.contains("ava") ? "ava av0" : el.className.replace(/(^|\s)av(\s|$)/, "$1av0$2");
+      p.innerHTML = ic("person");
+      el.replaceWith(p);
+      return;
+    }
+    var s = el.nextElementSibling;
+    if (!stubTpl || (s && s.classList.contains("mstub")) || el.closest(".rx") || el.classList.contains("cover-img")) return;
+    s = stubTpl.content.firstElementChild.cloneNode(true);   // reactions and the cover: style.css keeps their place
+    var kind = el.getAttribute("data-remote") || "image", w = el.getAttribute("width"), h = el.getAttribute("height");
+    s.setAttribute("data-kind", kind);
+    s.querySelector(".mstub-ic").innerHTML = ic("stub-" + kind);
+    if (w && h && (kind === "image" || kind === "video")) { s.style.setProperty("--w", w); s.style.setProperty("--h", h); }
+    if (el.closest("a")) { var b = s.querySelector(".mstub-retry"); if (b) b.remove(); }   // inside a link the click retries
+    el.after(s);
+  }
+  document.querySelectorAll("[data-failed]").forEach(placeholder);
+  document.addEventListener("error", function (e) {
+    var t = e.target;
+    if (t && t.hasAttribute && t.hasAttribute("data-remote")) { t.setAttribute("data-failed", "net"); placeholder(t); }
+  }, true);
+  function retry(el) {
+    var s = el.nextElementSibling, n = (+el.getAttribute("data-try") || 0) + 1;
+    if (s && s.classList.contains("mstub")) s.remove();
+    var src = (el.getAttribute("data-src") || el.getAttribute("src") || "").replace(/[?&]retry=\d+$/, "");
+    var fresh = el.hasAttribute("data-src");   // never requested yet: no need to get around the cache
+    el.removeAttribute("data-src");
+    el.removeAttribute("data-failed");
+    el.setAttribute("data-try", n);
+    el.src = fresh ? src : src + (src.indexOf("?") < 0 ? "?" : "&") + "retry=" + n;
+    if (el.load) el.load();
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest && e.target.closest(".mstub-retry");
+    var el = b && b.parentNode.previousElementSibling;
+    if (el && el.hasAttribute("data-failed")) { e.preventDefault(); retry(el); }
+  });
+
   // ---- "Продолжить ветку": a deep branch in a focus view where indentation starts from zero
   var stack = [];
   function strip(el) { el.removeAttribute("id"); el.querySelectorAll("[id]").forEach(function (x) { x.removeAttribute("id"); }); return el; }
@@ -80,8 +158,7 @@
     var ov = document.getElementById("focus");
     if (!ov) { ov = document.createElement("div"); ov.id = "focus"; ov.className = "focus"; document.body.appendChild(ov); }
     ov.innerHTML = '<div class="focus-in"><div class="focus-bar"><button class="icon-btn focus-back" type="button" title="Назад (Esc)" ' +
-      'aria-label="Назад">' + ic("arrow_back") + '</button><span class="focus-title">Продолжение ветки</span>' +
-      '<span class="muted small">уровень ' + stack.length + '</span></div></div>';
+      'aria-label="Назад">' + ic("arrow_back") + '</button><span class="focus-title">Продолжение ветки</span></div></div>';
     var inn = ov.firstChild, art = node.closest("article.mc"), anc = ancestorsOf(node);
     if (art && art.querySelector(".mc-post")) inn.appendChild(strip(art.querySelector(".mc-post").cloneNode(true)));
     if (anc.length > 1) {
@@ -128,16 +205,32 @@
     lb = new window.PhotoSwipeLightbox({
       pswpModule: window.PhotoSwipe, bgOpacity: 0.94, wheelToZoom: true, preload: [1, 2],
       closeTitle: "Закрыть (Esc)", zoomTitle: "Масштаб (Z)", arrowPrevTitle: "Назад (←)", arrowNextTitle: "Вперёд (→)",
-      errorMsg: "Не удалось загрузить изображение", indexIndicatorSep: " из "
+      indexIndicatorSep: " из "
     });
+    lb.addFilter("contentErrorElement", function () { return slideStub("image"); });   // the same placeholder
     lb.on("change", function () { if (openGallery && lb.pswp) selectSlide(openGallery, lb.pswp.currIndex); });
-    lb.on("destroy", function () { openGallery = null; });
+    lb.on("beforeOpen", function () { root.classList.add("pswp-open"); });   // no page scrolling underneath
+    lb.on("destroy", function () { openGallery = null; root.classList.remove("pswp-open"); });
     lb.init();
+  }
+  function slideStub(kind) {
+    var d = document.createElement("div");
+    d.className = "pswp-stub";
+    if (stubTpl) {
+      var s = stubTpl.content.firstElementChild.cloneNode(true), b = s.querySelector(".mstub-retry");
+      s.setAttribute("data-kind", kind);
+      s.querySelector(".mstub-ic").innerHTML = ic("stub-" + kind);
+      if (b) b.remove();
+      d.appendChild(s);
+    }
+    return d;
   }
   function pswpItem(a) {
     var img = a.querySelector("img"), vid = a.querySelector("video");
     var w = +a.getAttribute("data-pswp-width") || (img && img.naturalWidth) || (vid && vid.videoWidth) || 1600;
     var h = +a.getAttribute("data-pswp-height") || (img && img.naturalHeight) || (vid && vid.videoHeight) || 1200;
+    var failed = a.querySelector("[data-failed]");
+    if (failed) return { html: slideStub(failed.getAttribute("data-remote") || "image").outerHTML, element: a, width: w, height: h };
     if (a.hasAttribute("data-pswp-video")) {
       return { html: '<div class="pswp-video"><video src="' + a.href.replace(/"/g, "%22") +
         '" autoplay loop muted playsinline controls></video></div>', element: a, width: w, height: h };
@@ -158,6 +251,8 @@
     if (tile) { selectSlide(tile.closest(".b-gallery"), +tile.getAttribute("data-i")); return; }
     var a = e.target.closest("a.pswp-item");
     if (!a || !lb || e.ctrlKey || e.metaKey || e.shiftKey || e.button) return;
+    var failed = a.querySelector("[data-failed]");
+    if (failed) { e.preventDefault(); retry(failed); return; }   // a placeholder: the click tries to load it again
     var g = a.closest(".pswp-gallery");
     var items = g ? Array.prototype.slice.call(g.querySelectorAll("a.pswp-item")) : [a];
     e.preventDefault();
@@ -213,15 +308,8 @@
   function fmtB(b) { var u = ["Б", "КБ", "МБ", "ГБ", "ТБ"], i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return (i ? b.toFixed(1) : b) + " " + u[i]; }
   function fmtT(s) { s = Math.max(0, Math.round(s)); var m = Math.floor(s / 60), h = Math.floor(m / 60);
     return h ? h + " ч " + (m % 60) + " мин" : m ? m + " мин " + (s % 60) + " с" : s + " с"; }
+  // titles, icons and the job's percent come with the job (web/jobs.py), nothing is duplicated here
   function running(j) { return j.stages.filter(function (s) { return s.status === "running"; })[0]; }
-  function overall(j) {  // share of the whole job: finished stages + the running one's percent
-    var n = j.stages.length || 1, done = 0;
-    j.stages.forEach(function (s) {
-      if (s.status === "done" || s.status === "skipped") done += 1;
-      else if (s.status === "running" && s.pct != null) done += s.pct / 100;
-    });
-    return Math.min(100, Math.round(100 * done / n));
-  }
   var ind = document.querySelector(".job-ind");
   function pollIndicator() {
     if (document.hidden) return;
@@ -234,7 +322,7 @@
       var j = list.filter(function (x) { return x.state === "running"; })[0] || list[0];
       if (!ind) return;
       if (!j) { ind.hidden = true; return; }
-      var s = running(j), pct = overall(j), queued = j.state === "queued";
+      var s = running(j), pct = j.percent, queued = j.state === "queued";
       ind.hidden = false;
       ind.href = "/u/" + encodeURIComponent(j.nick) + "/sync";
       ind.classList.toggle("ind", queued || !s);
@@ -252,15 +340,9 @@
     var jobId = jp.getAttribute("data-job");
     var stagesEl = jp.querySelector(".jp-stages"), logEl = jp.querySelector(".jp-log"), logW = jp.querySelector(".jp-logw");
     var stateEl = jp.querySelector(".jp-state"), timeEl = jp.querySelector(".jp-time"), icEl = jp.querySelector(".jp-ic");
-    var stopF = jp.querySelector(".job-stop"), acts = jp.querySelector(".job-actions");
-    var STATE = { queued: "В очереди", running: "Идёт синхронизация", done: "Готово",
-                  cancelled: "Остановлено — прогресс сохранён", error: "Ошибка",
-                  blocked: "Остановлено защитой архива" };
-    var JIC = { queued: "schedule", running: "sync", done: "check_circle", cancelled: "cancel", error: "error",
-                blocked: "gpp_maybe" };
-    var ST = { pending: "ожидает", running: "идёт", done: "готово", skipped: "пропущено", stopped: "остановлено", error: "ошибка" };
-    var SIC = { pending: "radio_button_unchecked", running: "progress_activity", done: "check_circle", skipped: "block",
-                stopped: "cancel", error: "error" };
+    var stopF = jp.querySelector(".job-stop"), acts = jp.querySelector(".job-actions"), netEl = jp.querySelector(".jp-net");
+    // a job that ended before the page opened: the page's own lines (when it synced, the next autosync) stay
+    var watched = jp.getAttribute("data-running") === "1";
     function details(s) {
       var p = [];
       if (s.key === "comments" && s.comments != null) {
@@ -281,21 +363,30 @@
     }
     function render(j) {
       var live = j.state === "queued" || j.state === "running";
-      stateEl.textContent = STATE[j.state] || j.state;
-      icEl.className = "jp-ic " + j.state;
-      icEl.innerHTML = ic(JIC[j.state] || "sync");
-      var t0 = j.started || j.created, t1 = j.finished || Date.now() / 1000;
-      timeEl.textContent = (j.params && j.params.full ? "полная перепроверка · " : "") + (t0 ? "время " + fmtT(t1 - t0) : "");
+      if (live) watched = true;
+      if (watched) {
+        stateEl.textContent = j.title;
+        icEl.className = "jp-ic " + j.state;
+        icEl.innerHTML = ic(j.icon);
+        var t0 = j.started || j.created, t1 = j.finished || Date.now() / 1000;
+        timeEl.textContent = (j.params && j.params.full ? "проверка всего заново · " : "") + (t0 ? "идёт " + fmtT(t1 - t0) : "");
+      }
+      var net = live && j.net, wait = net && (net.fused ? "DTF ограничил запросы: все синхронизации на паузе ещё " +
+        fmtT(net.fused) + ". Прогресс сохраняется." : net.backoff ? "DTF просит подождать: пауза " + fmtT(net.backoff) +
+        ", темп снижен до " + net.rate + " запросов в секунду." : "");
+      if (netEl) {
+        var nh = wait ? '<div class="banner warn">' + ic("warning") + '<div class="banner-t">' + esc(wait) + "</div></div>" : "";
+        if (netEl.__html !== nh) { netEl.innerHTML = nh; netEl.__html = nh; netEl.hidden = !wait; }
+      }
       var html = j.stages.map(function (s) {
-        if (!live && s.status === "running") s = Object.assign({}, s, { status: j.state === "error" ? "error" : "stopped", eta: null });
         var run = s.status === "running";
         var pct = s.status === "done" ? 100 : s.pct != null ? s.pct : null;
-        var val = s.total && s.done != null ? fmtN(s.done) + " / " + fmtN(s.total) : ST[s.status] || s.status;
+        var val = s.total && s.done != null ? fmtN(s.done) + " / " + fmtN(s.total) : s.statusTitle;
         if (run && pct != null) val += " · " + Math.round(pct) + "%";
         var bar = !run ? "" : pct != null ? '<div class="lp"><div class="lp-i" style="width:' + pct + '%"></div></div>'
                                           : '<div class="lp ind"><div class="lp-i"></div></div>';
         var d = run || s.status === "error" ? details(s) : "";
-        return '<div class="st st-' + s.status + '"><div class="st-h">' + ic(SIC[s.status] || "radio_button_unchecked") +
+        return '<div class="st st-' + s.status + '"><div class="st-h">' + ic(s.icon) +
           '<span class="st-t">' + esc(s.title) + '</span><span class="st-v">' + esc(val) + "</span></div>" + bar +
           (d ? '<div class="st-d">' + esc(d) + "</div>" : "") + "</div>";
       }).join("") + (j.error ? '<div class="banner err jp-err">' + ic("error") + '<div class="banner-t">' + esc(j.error) + "</div></div>" : "");
@@ -307,26 +398,19 @@
         logEl.scrollTop = atEnd ? logEl.scrollHeight : pos;
       }
       if (logW) logW.hidden = false;
-      if (stopF) stopF.hidden = !live;
+      if (stopF) stopF.hidden = !(live && j.stoppable);
       if (acts) acts.hidden = live;
       jp.setAttribute("data-running", live ? "1" : "0");
     }
     var seenLive = false;
-    function refreshStatus() {  // the job finished while we watched: update the numbers in place, no reload
-      fetch(location.pathname).then(function (r) { return r.text(); }).then(function (t) {
-        var doc = new DOMParser().parseFromString(t, "text/html");
-        [["pre.status", "textContent"], [".sync-stats", "innerHTML"]].forEach(function (p) {
-          var fresh = doc.querySelector(p[0]), cur = document.querySelector(p[0]);
-          if (fresh && cur) cur[p[1]] = fresh[p[1]];
-        });
-      }).catch(function () {});
-    }
     function poll() {
       fetch("/api/jobs/" + jobId).then(function (r) { return r.json(); }).then(function (j) {
         if (j.error && !j.stages) return;
         render(j);
         if (j.state === "queued" || j.state === "running") { seenLive = true; setTimeout(poll, 1000); }
-        else if (seenLive) { seenLive = false; if (j.state === "blocked") location.reload(); else refreshStatus(); }
+        // it ended while we watched: the page shows the result (numbers, changes on DTF, next autosync) — keep the
+        // finished stages and the journal visible though, they are what the user was watching
+        else if (seenLive) { seenLive = false; location.reload(); }
       }).catch(function () { setTimeout(poll, 3000); });
     }
     poll();

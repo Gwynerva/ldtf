@@ -60,29 +60,32 @@ class SettingsTest(unittest.TestCase):
             p = Path(d) / "settings.json"
             p.write_text(json.dumps({"auto_sync_hours": 6, "workers": 3}), encoding="utf-8")
             s = load_settings(p)
-            self.assertEqual((s["schedule"], s["schedule_hours"], s["workers"]), ("interval", 6, 3))
+            self.assertEqual((s["schedule"], s["schedule_hours"], s["scope"]), ("interval", 6, "all"))
+            self.assertNotIn("workers", s)   # network knobs are not archive settings any more
             p.write_text(json.dumps({"auto_sync_hours": 0}), encoding="utf-8")
             self.assertEqual(load_settings(p)["schedule"], "off")
 
     def test_form_keeps_hidden_fields(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "settings.json"
-            save_settings(p, {"workers": 7, "media": "1"})
-            s = save_settings(p, {"schedule": "daily", "schedule_time": "5:07", "schedule_hours": "999",
-                                  "refresh_days": "10"})   # the form has no network fields and no "media" = off
+            save_settings(p, {"refresh_days": 7, "media": "posts", "scope": "posts"})
+            s = save_settings(p, {"schedule": "daily", "schedule_time": "5:07", "schedule_hours": "999"})
             self.assertEqual((s["schedule"], s["schedule_time"], s["schedule_hours"]), ("daily", "05:07", 168))
-            self.assertEqual((s["workers"], s["media"], s["refresh_days"]), (7, False, 10))
+            # fields the form doesn't have (refresh_days: settings.json / CLI only) and radios keep their values
+            self.assertEqual((s["refresh_days"], s["media"], s["scope"]), (7, "posts", "posts"))
+            self.assertEqual(save_settings(p, {"scope": "everything"})["scope"], "posts")   # unknown choice ignored
             s = save_settings(p, {"schedule": "weekly", "schedule_time": "25:00"})
             self.assertEqual((s["schedule"], s["schedule_time"]), ("daily", "05:07"))   # invalid values ignored
 
     def test_app_settings(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             lib = Path(d)
-            self.assertEqual(load_app_settings(lib)["max_parallel"], 2)
+            self.assertEqual(load_app_settings(lib), {"autosync": True, "notify": True, "open_browser": True})
+            # values of older versions (the network budget was a setting) are ignored, not an error
             s = save_app_settings(lib, {"max_parallel": "9", "api_rate": "0.2", "autosync": "1", "notify": "1"})
-            self.assertEqual((s["max_parallel"], s["api_rate"], s["open_browser"]), (3, 1.0, False))
+            self.assertEqual(s, {"autosync": True, "notify": True, "open_browser": False})
             s = save_app_settings(lib, {"autosync": False}, partial=True)   # tray toggle keeps the rest
-            self.assertEqual((s["autosync"], s["notify"], s["max_parallel"]), (False, True, 3))
+            self.assertEqual((s["autosync"], s["notify"]), (False, True))
 
 
 if __name__ == "__main__":

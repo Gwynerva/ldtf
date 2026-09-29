@@ -17,6 +17,7 @@ from .http import HttpClient, HttpError
 API = "https://api.dtf.ru"
 MEDIA = "https://leonardo.osnova.io"
 SITE = "https://dtf.ru"
+NOT_FOUND = (403, 404, 410, 451)   # gone for good: deleted, hidden or blocked
 
 
 class ApiError(Exception):
@@ -97,9 +98,7 @@ class Dtf:
         r = self._get("v2.10", "comments", {"commentId": comment_id})
         return r.get("items", [])
 
-    def comment_replies(self, comment_id: int) -> list[dict]:
-        r = self._get("v2.5", "comments", {"commentId": comment_id, "onlyReplies": "true"})
-        return r.get("items", [])
+    FAR_ID = 999_999_999   # "from the newest": a comment id above any real one
 
     def user_comments_page(self, subsite_id: int, last_id: int | None = None,
                            last_sorting_value: int | None = None) -> tuple[list[dict], int | None, int | None]:
@@ -119,4 +118,4 @@ class Dtf:
 
 
 def is_not_found(e: Exception) -> bool:
-    return isinstance(e, HttpError) and e.status in (403, 404, 410, 451)
+    return isinstance(e, HttpError) and e.status in NOT_FOUND

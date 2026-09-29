@@ -5,17 +5,16 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import shutil
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .api import SITE, comment_url
+from .api import comment_url, post_url
 from .blocks import Ctx, Report, media_norm, render_blocks
 from .context import ancestors, descendants
-from .normalize import Linker, MediaResolver, comment_text, media_info, slug_from_url
+from .normalize import Linker, MediaResolver, comment_text, media_info, post_ref, slug_from_url
 from .reactions import Reactions, reaction_pairs, reactions_total
-from .util import MSK, atomic_write_text, dumps, human_bytes, ts_human, ts_iso, write_json
+from .util import MSK, atomic_write_text, dumps, ts_human, ts_iso, write_json
 from .viewdb import Dataset, group_view, post_cover, post_lead
 from .web.ui import CommentView, Links, md_tree, month_title
 
@@ -49,7 +48,7 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
             _, blocks_md, blocks_norm = render_blocks(p.get("blocks") or [], ctx)
             repost_md, repost_norm = _repost(p, ctx)
             title = p.get("title") or ""
-            url = p.get("url") or f"{SITE}/{pid}"
+            url = p.get("url") or post_url(pid)
             counters = p.get("counters") or {}
             pairs = reaction_pairs(p)
             items = ds.trees.get(pid, [])
@@ -122,6 +121,9 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
     write_json(data / "reactions.json", rx.catalog())
     n_media = _media_catalog(ds, data, resolver)
 
+    if not ds.comments:   # an archive of posts only: no empty comment files to puzzle over
+        for name in ("post-comments.jsonl", "comments.jsonl", "context.jsonl"):
+            (data / name).unlink(missing_ok=True)
     for name, p in tmp.items():
         _swap(p, arch.root / name)
     counts = {"posts": len(ds.posts), "myComments": len(ds.my), "postComments": n_pc, "contextComments": n_ctx,
@@ -138,14 +140,12 @@ def _subsite(p: dict) -> dict | None:
 
 def _repost(p: dict, ctx: Ctx) -> tuple[str, dict | None]:
     rd = (p.get("repostData") or {}).get("data")
-    if not isinstance(rd, dict):
+    r = post_ref(rd)
+    if r is None:
         return "", None
-    oid = rd.get("original_id")
-    url = rd.get("url") or (f"{SITE}/{oid}" if oid else "")
-    author = (rd.get("author") or {}).get("name") or (rd.get("subsite") or {}).get("name") or ""
     _, bmd, bnorm = render_blocks(rd.get("blocks") or [], ctx)
-    md = f"> 🔁 Репост: [{rd.get('title') or 'Пост'}]({url}) — {author}\n\n{bmd}"
-    return md, {"postId": oid, "url": url, "title": rd.get("title"), "author": author, "date": rd.get("date"),
+    md = f"> 🔁 Репост: [{r['title'] or 'Пост'}]({r['url']}) — {r['author']}\n\n{bmd}"
+    return md, {"postId": r["id"], "url": r["url"], "title": r["title"], "author": r["author"], "date": r["date"],
                 "blocks": bnorm}
 
 
@@ -184,7 +184,7 @@ def _comment_row(ds: Dataset, c: dict, rx: Reactions, cv: CommentView, links: Li
 def _md_group(ds: Dataset, g: dict, cv: CommentView) -> list[str]:
     eid = g["entry_id"]
     title = ds.entry_title(eid) or "Пост"
-    url = f"{SITE}/{eid}" if eid else ""
+    url = post_url(eid) if eid else ""
     out = [f"## {ts_human(g['last_date'])} — [{title}]({url})", ""]
     gv = group_view(ds.entry_index(g["entry_id"]), g["mine"], g["root_id"])
     if gv["standalone"]:
@@ -234,21 +234,24 @@ def _readme(ds: Dataset, counts: dict) -> None:
     prof = ds.prof
     name = prof.get("name")
     uri = (prof.get("uri") or "").strip("/")
+    comment_rows = (f"""| Комментарии пользователя (со всего сайта) | {counts['myComments']} |
+| Комментарии под постами пользователя (все авторы) | {counts['postComments']} |
+| Комментарии других людей из веток обсуждений | {counts['contextComments']} |
+""" if ds.comments else "")
+    scope = ("" if ds.comments else "\n**Архив хранит только посты:** комментарии не сохраняются (настройка архива "
+                                    "«Что сохранять» в LDTF). Файлов комментариев в `data/` и `md/comments/` нет.\n")
     txt = f"""# Архив DTF: {name} (@{uri}, id {prof.get('id')})
 
-Копия постов и комментариев пользователя [{name}]({prof.get('url')}) на DTF.
+Копия {"постов и комментариев" if ds.comments else "постов"} пользователя [{name}]({prof.get('url')}) на DTF.
 Создано приложением LDTF (Local DTF) {__version__}. Данные собраны: {_dt.datetime.now(MSK):%d.%m.%Y %H:%M} (МСК).
-
+{scope}
 **Смотреть:** запустите `LDTF.cmd` в папке приложения (двумя уровнями выше): LDTF откроется в браузере, значок — в трее.
 **Без приложения:** Markdown в `md/` (читается любым редактором) и данные в `data/`.
 
 | Что | Сколько |
 |---|---|
 | Посты пользователя | {counts['posts']} |
-| Комментарии пользователя (со всего сайта) | {counts['myComments']} |
-| Комментарии под постами пользователя (все авторы) | {counts['postComments']} |
-| Комментарии других людей из веток обсуждений | {counts['contextComments']} |
-| Медиа этого архива (ссылок) | {counts['mediaRefs']} |
+{comment_rows}| Медиа этого архива (ссылок) | {counts['mediaRefs']} |
 
 ## Структура
 
@@ -275,7 +278,8 @@ archive/                       библиотека приложения
 - `posts.jsonl` — 1 строка = 1 пост: `id, url, title, date, dateIso, dateModified, subsite, isRepost, repostOf,
   counters, reactions, lead, cover, blocks[], unlisted, local{{app, md}}`. Блок: `{{type, supported, anchor?, spoiler?,
   cover?, ...поля}}`, `supported`: `true` — полная поддержка, `"generic"` — упрощённо (исходник в `raw`), `false` —
-  неизвестный тип (исходный JSON в `raw`). Медиа: `{{key, kind, local, remote, width, height, ...}}`.
+  неизвестный тип (исходный JSON в `raw`). Медиа: `{{key, kind, local, remote, width, height, ...}}`
+  (`local` — путь в общем хранилище, если файл скачан; `gone: true` — DTF ответил, что файла больше нет).
 - `post-comments.jsonl` — все комментарии под постами пользователя: `id, postId, parentId, level, date, author, isMine,
   text, media, likes, reactions, isRemoved, url`.
 - `comments.jsonl` — 1 строка = 1 комментарий пользователя: `id, date, url, post{{id, title, subsiteId, subsiteName, isOwn}},
@@ -296,7 +300,7 @@ SQL: `.state/view.sqlite` (схема в докстринге `dtf_backup/viewdb
 
 ## Обновление
 
-В приложении: кнопка «Синхронизировать» или автосинхронизация при запуске (настройки архива).
+В приложении: кнопка «Синхронизировать» или автосинхронизация по расписанию (настройки архива).
 Из консоли (для скриптов): `python -m dtf_backup sync --user {uri}`; `render` пересобирает `view.sqlite`, `md/`
 и `data/` без сети; `status` показывает прогресс; `check-api` проверяет, что API DTF отвечает как ожидается.
 Как устроены данные DTF и API: `docs/DTF_API.md` в папке приложения.

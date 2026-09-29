@@ -18,7 +18,7 @@ from .media import avatar_key, collect_media, raw_key
 from .normalize import REDIRECT_RE, unwrap_url
 
 KNOWN_BLOCKS = set(FULL) | set(PARTIAL) | set(GENERIC_TYPES)
-FAR = 999_999_999
+FAR = Dtf.FAR_ID
 
 
 class Check:
@@ -30,13 +30,24 @@ class Warn(Exception):
     """Not broken, but worth a look (e.g. a new editor block type)."""
 
 
-def _ctx(user: str, net: Any = None) -> dict:
+class NoData(Exception):
+    """A check needs what an earlier check should have found (that one failed)."""
+
+
+class Ctx(dict):
+    """Results shared between checks; a missing one is NoData, not a KeyError (those mean the API changed)."""
+
+    def __missing__(self, key: str) -> Any:
+        raise NoData(key)
+
+
+def _ctx(user: str, net: Any = None) -> Ctx:
     if net is not None:  # inside the app: share the network budget with running syncs
         client = net.client(timeout=30, attempts=2)
     else:
         client = HttpClient({"api.dtf.ru": AdaptiveLimiter("api", 2, rate=5, fuse=3, base_backoff=3),
                              "*": AdaptiveLimiter("media", 2, fuse=3, base_backoff=3)}, timeout=30, attempts=2)
-    return {"user": user, "client": client, "api": Dtf(client)}
+    return Ctx(user=user, client=client, api=Dtf(client))
 
 
 # ---------------------------------------------------------------------- checks
@@ -248,7 +259,7 @@ def run_checks(user: str = "petra", on_result: Callable[[dict], Any] | None = No
                 r = {"key": ch.key, "name": ch.name, "ok": True, "detail": detail}
             except Warn as w:
                 r = {"key": ch.key, "name": ch.name, "ok": False, "warn": True, "detail": str(w), "hint": ch.hint}
-            except KeyError as e:
+            except NoData as e:
                 r = {"key": ch.key, "name": ch.name, "ok": False, "detail": f"нет данных от предыдущей проверки: {e}",
                      "hint": ch.hint}
             except Exception as e:  # noqa: BLE001

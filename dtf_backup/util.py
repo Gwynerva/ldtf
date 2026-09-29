@@ -7,6 +7,7 @@ import gzip
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Any, Iterable
 log = logging.getLogger("dtf_backup")
 
 MSK = _dt.timezone(_dt.timedelta(hours=3), "MSK")
+HOUR, DAY = 3600, 86400
 
 
 def setup_logging(log_file: Path | None, verbose: bool = False, app_log: Path | None = None) -> None:
@@ -118,19 +120,15 @@ def write_json_gz(path: Path, obj: Any) -> None:
     atomic_write_bytes(path, gzip.compress(dumps(obj).encode("utf-8"), compresslevel=6, mtime=0))
 
 
-def read_json_gz(path: Path) -> Any:
+_REQUIRED: Any = object()
+
+
+def read_json_gz(path: Path, default: Any = _REQUIRED) -> Any:
+    """A gzipped JSON file; `default` if it does not exist (without a default a missing file is an error)."""
+    if default is not _REQUIRED and not path.exists():
+        return default
     with gzip.open(path, "rt", encoding="utf-8") as f:
         return json.load(f)
-
-
-def write_jsonl(path: Path, rows: Iterable[Any]) -> int:
-    n = 0
-    parts = []
-    for r in rows:
-        parts.append(dumps(r))
-        n += 1
-    atomic_write_text(path, "\n".join(parts) + ("\n" if parts else ""))
-    return n
 
 
 def write_jsonl_gz(path: Path, rows: Iterable[Any]) -> int:
@@ -143,6 +141,37 @@ def write_jsonl_gz(path: Path, rows: Iterable[Any]) -> int:
 def read_jsonl_gz(path: Path) -> list[Any]:
     with gzip.open(path, "rt", encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
+
+
+POSTS = ("пост", "поста", "постов")
+COMMENTS = ("комментарий", "комментария", "комментариев")
+FILES = ("файл", "файла", "файлов")
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """The word for n: 1 пост, 2 поста, 5 постов (forms: POSTS, COMMENTS, ... or any three)."""
+    n = abs(int(n)) % 100
+    if 10 < n < 20:
+        return many
+    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
+
+
+def num(n: int | float) -> str:
+    return f"{int(n):,}".replace(",", " ")  # no-break space: "89 675" never splits across lines
+
+
+def count_label(n: int, one: str, few: str, many: str) -> str:
+    """"89 675 комментариев"."""
+    return f"{num(n)} {plural(n, one, few, many)}"
+
+
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def short(text: str | None, n: int = 90) -> str:
+    """One line of plain text (tags dropped), at most n characters, "…" when cut."""
+    t = " ".join(_TAGS.sub(" ", text or "").split())
+    return t[:n] + ("…" if len(t) > n else "")
 
 
 def human_bytes(n: float) -> str:

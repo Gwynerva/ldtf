@@ -82,12 +82,6 @@ class NetPoolTest(unittest.TestCase):
         lim.acquire()                                    # reopened after the cooldown
         lim.release(True)
 
-    def test_configure_applies_live(self) -> None:
-        pool = NetPool(api_rate=10, api_conn=4, media_conn=8)
-        pool.configure({"api_rate": 5, "api_conn": 2, "media_conn": 3})
-        st = pool.state()
-        self.assertEqual((st["api"]["max"], st["api"]["rate"], st["media"]["max"]), (2, 5.0, 3))
-
 
 class SlowJobs(JobManager):
     def __init__(self, *a, **kw):

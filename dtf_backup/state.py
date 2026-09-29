@@ -76,6 +76,12 @@ CREATE INDEX IF NOT EXISTS store.blob_sig ON blob(sig);
 """
 
 
+# meta keys read outside the sync (scheduler, app pages, tray)
+META_GUARD = "guard"                 # the archive guard stopped the sync: {kind, message, details, ts} (guard.py)
+META_LAST_SYNC = "last_sync"         # the last finished sync: {ts, finished, stages, stats}
+META_SYNC_ATTEMPT = "sync_attempt"   # the last try for the scheduler's backoff: {ts, ok, fails}
+
+
 def pack(obj: Any) -> bytes:
     return zlib.compress(json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), 6)
 
@@ -88,21 +94,36 @@ def store_path(library: Path) -> Path:
     return library / ".state" / "media.sqlite"
 
 
-def open_store(library: Path) -> sqlite3.Connection:
-    """Standalone connection to the shared media catalog (tables available as store.*)."""
-    p = store_path(library)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(":memory:", timeout=60)
+def state_db(root: Path) -> Path:
+    """An archive's own database."""
+    return root / ".state" / "state.sqlite"
+
+
+def connect_ro(path: Path, timeout: float = 5) -> sqlite3.Connection:
+    """Read-only connection that never creates or migrates anything (the path is URI-escaped: '#', '%', spaces)."""
+    db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout, check_same_thread=False)
     db.row_factory = sqlite3.Row
-    db.execute("ATTACH DATABASE ? AS store", (str(p),))
+    return db
+
+
+def _attach_store(db: sqlite3.Connection, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db.execute("ATTACH DATABASE ? AS store", (str(path),))
     db.execute("PRAGMA store.journal_mode=WAL")
     db.executescript(STORE_SCHEMA)
+
+
+def open_store(library: Path) -> sqlite3.Connection:
+    """Standalone connection to the shared media catalog (tables available as store.*)."""
+    db = sqlite3.connect(":memory:", timeout=60)
+    db.row_factory = sqlite3.Row
+    _attach_store(db, store_path(library))
     return db
 
 
 def is_archive_dir(p: Path) -> bool:
     return p.is_dir() and not p.name.startswith(".") and p.name != "media" and (
-        (p / ".state" / "state.sqlite").exists() or (p / "raw" / "profile.json.gz").exists())
+        state_db(p).exists() or (p / "raw" / "profile.json.gz").exists())
 
 
 def archive_dirs(library: Path) -> list[Path]:
@@ -120,10 +141,9 @@ class Archive:
         self.raw = self.root / "raw"
         self.media = self.library / "media"            # shared
         self.store_path = store_path(self.library)
-        self.data = self.root / "data"
-        self.md = self.root / "md"
-        self.db_path = self.state_dir / "state.sqlite"
+        self.db_path = state_db(self.root)
         self.view_path = self.state_dir / "view.sqlite"
+        self.lock_path = self.state_dir / "sync.lock"
         self.settings_path = self.state_dir / "settings.json"
         self.log_path = self.state_dir / "sync.log"
         self.report_path = self.state_dir / "render-report.json"
@@ -149,9 +169,7 @@ class Archive:
             db.execute("PRAGMA synchronous=NORMAL")
             db.executescript(SCHEMA)
             _add_columns(db)
-            db.execute("ATTACH DATABASE ? AS store", (str(self.store_path),))
-            db.execute("PRAGMA store.journal_mode=WAL")
-            db.executescript(STORE_SCHEMA)
+            _attach_store(db, self.store_path)
             self._db = db
             if self.get_meta("schema_version") is None:
                 self.set_meta("schema_version", SCHEMA_VERSION)
@@ -184,6 +202,17 @@ class Archive:
     def settings(self) -> dict:
         from .settings import load_settings
         return load_settings(self.settings_path)
+
+    def media_usage(self) -> tuple[int, int]:
+        """(files, bytes) of the shared store this archive uses; (0, 0) when its database can't be read."""
+        try:
+            r = self.db.execute("SELECT COUNT(*), COALESCE(SUM(b.size),0) FROM store.blob b WHERE b.sha256 IN "
+                                "(SELECT r.sha256 FROM store.media_ref r WHERE r.key IN (SELECT key FROM main.media_use))"
+                                ).fetchone()
+            return r[0], r[1]
+        except sqlite3.Error as e:
+            log.warning(f"[{self.nick}] размер медиа архива не посчитан: {e}")
+            return 0, 0
 
     # media queue
     def queue_media(self, refs: Iterable[tuple[str, str | None, str | None]], owner: str) -> int:
@@ -241,20 +270,28 @@ class Archive:
         db.commit()
 
 
-def peek_meta(root: Path, key: str) -> Any:
-    """One meta value of an archive, read-only and cheap (no schema setup): for page chrome and the tray."""
-    p = root / ".state" / "state.sqlite"
+def read_meta(root: Path, keys: Iterable[str]) -> dict[str, Any] | None:
+    """Meta values of an archive, read-only and cheap (no schema setup, no store): {key: value} for the keys present;
+    {} for an archive without state yet, None if its database can't be read (callers must not guess then)."""
+    p = state_db(root)
     if not p.exists():
-        return None
+        return {}
+    keys = list(keys)
     try:
-        con = sqlite3.connect(f"{p.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        con = connect_ro(p)
         try:
-            row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            rows = con.execute(f"SELECT key, value FROM meta WHERE key IN ({','.join('?' * len(keys))})", keys).fetchall()
         finally:
             con.close()
-        return json.loads(row[0]) if row else None
-    except (sqlite3.Error, ValueError):
+        return {r[0]: json.loads(r[1]) for r in rows}
+    except (sqlite3.Error, ValueError) as e:
+        log.debug(f"[{root.name}] meta не читается: {e}")
         return None
+
+
+def peek_meta(root: Path, key: str) -> Any:
+    """One meta value (None if absent or unreadable): for page chrome and the tray."""
+    return (read_meta(root, [key]) or {}).get(key)
 
 
 def _add_columns(db: sqlite3.Connection) -> None:
@@ -267,36 +304,69 @@ def _add_columns(db: sqlite3.Connection) -> None:
     db.commit()
 
 
-def gc_media(library: Path) -> tuple[int, int]:
-    """Delete blobs (and catalog rows) no longer used by any archive. Returns (files, bytes)."""
-    used: set[str] = set()
-    for d in archive_dirs(library):
-        p = d / ".state" / "state.sqlite"
-        if not p.exists():
-            continue
-        con = sqlite3.connect(p, timeout=60)
-        try:
-            used.update(r[0] for r in con.execute("SELECT DISTINCT key FROM media_use"))
-        except sqlite3.OperationalError:
-            pass
-        con.close()
-    db = open_store(library)
-    keep = {r[1] for r in db.execute("SELECT key, sha256 FROM store.media_ref WHERE sha256 IS NOT NULL")
-            if r[0] in used}
-    files = size = 0
-    for row in db.execute("SELECT sha256, path, size FROM store.blob").fetchall():
-        if row["sha256"] in keep:
-            continue
-        f = library / "media" / row["path"]
-        try:
-            f.unlink()
-            files += 1
-            size += row["size"] or 0
-        except FileNotFoundError:
-            pass
-        db.execute("DELETE FROM store.blob WHERE sha256=?", (row["sha256"],))
-    stale = [r[0] for r in db.execute("SELECT key FROM store.media_ref") if r[0] not in used]
-    db.executemany("DELETE FROM store.media_ref WHERE key=?", [(k,) for k in stale])
-    db.commit()
-    db.close()
-    return files, size
+def gc_pending(library: Path) -> Path:
+    """Marker of a postponed media cleanup (the app retries it on its next start)."""
+    return library / ".state" / "gc-pending"
+
+
+def gc_media(library: Path, busy: bool = False) -> dict[str, Any]:
+    """Delete blobs (and catalog rows) no longer used by any archive.
+
+    Never guesses: it holds every archive's sync lock while it runs (a sync that starts meanwhile waits for the next
+    try), and if a sync is running (`busy`: in this app; a held lock: in another process) or any archive's database
+    can't be read, nothing is deleted and the cleanup is postponed.
+    Returns {"status": "done"|"postponed", "files", "bytes", "reason"}."""
+    from .sync import acquire_lock, release_lock   # sync imports this module
+    marker = gc_pending(library)
+
+    def postpone(reason: str) -> dict[str, Any]:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(reason, encoding="utf-8")
+        log.warning(f"[медиа] очистка хранилища отложена: {reason}")
+        return {"status": "postponed", "files": 0, "bytes": 0, "reason": reason}
+
+    if busy:
+        return postpone("идёт синхронизация")
+    dirs = [d for d in archive_dirs(library) if state_db(d).exists()]
+    held: list[Path] = []
+    try:
+        for d in dirs:
+            lock = Archive(d, library).lock_path
+            if acquire_lock(lock):
+                return postpone("идёт синхронизация")
+            held.append(lock)
+        files = size = 0
+        if store_path(library).exists():
+            used: set[str] = set()
+            for d in dirs:
+                arch = Archive(d, library)   # opening migrates a legacy layout, so media_use exists
+                try:
+                    used.update(r[0] for r in arch.db.execute("SELECT DISTINCT key FROM main.media_use"))
+                except sqlite3.Error as e:
+                    return postpone(f"не читается архив {d.name}: {e}")
+                finally:
+                    arch.close()
+            db = open_store(library)
+            try:
+                keep = {r[1] for r in db.execute("SELECT key, sha256 FROM store.media_ref WHERE sha256 IS NOT NULL")
+                        if r[0] in used}
+                for row in db.execute("SELECT sha256, path, size FROM store.blob").fetchall():
+                    if row["sha256"] in keep:
+                        continue
+                    try:
+                        (library / "media" / row["path"]).unlink()
+                        files += 1
+                        size += row["size"] or 0
+                    except FileNotFoundError:
+                        pass
+                    db.execute("DELETE FROM store.blob WHERE sha256=?", (row["sha256"],))
+                stale = [r[0] for r in db.execute("SELECT key FROM store.media_ref") if r[0] not in used]
+                db.executemany("DELETE FROM store.media_ref WHERE key=?", [(k,) for k in stale])
+                db.commit()
+            finally:
+                db.close()
+    finally:
+        for lock in held:
+            release_lock(lock)
+    marker.unlink(missing_ok=True)
+    return {"status": "done", "files": files, "bytes": size, "reason": ""}

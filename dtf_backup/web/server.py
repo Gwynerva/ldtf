@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 import threading
 import time
 import urllib.parse
@@ -25,15 +26,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .. import __version__
+from .. import DEFAULT_PORT, __version__
 from ..appsettings import load_app_settings, save_app_settings
+from ..media import avatar_key, lookup
 from ..netpool import NetPool
-from ..scheduler import Scheduler, next_run
-from ..state import Archive, archive_dirs, peek_meta
+from ..normalize import MediaResolver
+from ..reactions import CONFIG_NAME
+from ..scheduler import Scheduler, next_sync
+from ..scope import comments_kept, pending_drop
+from ..state import META_GUARD, Archive, archive_dirs, gc_pending, peek_meta
 from ..util import log, read_json_gz, write_json
-from ..viewdb import open_view, view_meta, view_ready
+from ..viewdb import open_view, view_meta, view_outdated, view_ready
 from . import app_pages, viewer
-from .jobs import JobManager
+from .jobs import KINDS, RUNNING, JobManager
 from .ui import ASSETS, Links, Shell, avatar_src, btn, empty_state
 
 E = html.escape
@@ -42,6 +47,7 @@ MIME = {".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm", ".avi
         ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
         ".json": "application/json", ".ico": "image/x-icon", ".m4a": "audio/mp4", ".mp3": "audio/mpeg"}
 NICK_RE = re.compile(r"^[\w.\-]{1,64}$")
+FLASH = "<!--flash-->"   # where a page shows the outcome of the form that led to it (App.flash)
 
 
 class App:
@@ -57,9 +63,11 @@ class App:
         self._accounts: tuple[float, list[dict]] | None = None
         self.diag: dict[str, Any] = {"state": "idle", "results": [], "started": None, "finished": None}
         self._settings = load_app_settings(self.library)
-        self.net = NetPool.from_settings(self._settings)   # one network budget for every sync and lookup
-        self.jobs = JobManager(self.library, on_change=self.invalidate, net=self.net,
-                               max_parallel=int(self._settings["max_parallel"]), on_finish=self._job_finished)
+        self.net = NetPool()   # one network budget for every sync and lookup
+        self.jobs = JobManager(self.library, on_change=self.invalidate, net=self.net, on_finish=self._job_finished)
+        self.jobs.auto_retry = lambda nick: self.next_run(nick) is not None
+        self.scheduling = True   # False: started without automatic syncs (serve --no-auto-sync)
+        self._flash: dict[str, tuple[float, str]] = {}   # path -> (time, HTML): the outcome of a form, shown once
         self.req = threading.local()  # per-request: archive from the path (nick) and the last opened one (cookie)
         self.token = secrets.token_urlsafe(24)  # JSON job API (CLI), stored in the run file
         self.scheduler = Scheduler(self)
@@ -72,8 +80,6 @@ class App:
 
     def save_settings(self, values: dict, partial: bool = False) -> dict:
         s = self._settings = save_app_settings(self.library, values, partial)
-        self.net.configure(s)
-        self.jobs.set_parallel(int(s["max_parallel"]))
         return s
 
     def _job_finished(self, job: Any) -> None:
@@ -84,20 +90,22 @@ class App:
                 log.exception("[app] уведомление о задании")
 
     def next_run(self, nick: str) -> float | None:
-        """When the scheduler will sync this archive (None: schedule off / paused)."""
-        if not self._settings.get("autosync", True):
+        """When the scheduler will sync this archive (None: schedule off / paused / stopped by the archive guard)."""
+        if not (self.scheduling and self._settings["autosync"]) or not NICK_RE.match(nick):
             return None
-        acc = self.account(nick)
-        if acc and acc.get("guard"):   # stopped by the archive guard: waits for the user
-            return None
-        arch = self.archive(nick)
-        if arch is None or not arch.exists():
-            return None
-        try:
-            last = (arch.get_meta("last_sync") or {}).get("finished")
-            return next_run(arch.settings(), last, arch.get_meta("sync_attempt"), time.time())
-        finally:
-            arch.close()
+        return next_sync(self.library / nick)
+
+    # ------------------------------------------------------------------ outcome of a form (post / redirect / get)
+    def flash(self, path: str, html_: str) -> None:
+        with self.lock:
+            self._flash[path] = (time.time(), html_)
+
+    def take_flash(self, path: str) -> str:
+        with self.lock:
+            t, h = self._flash.pop(path, (0.0, ""))
+            for k in [k for k, (ts, _) in self._flash.items() if time.time() - ts > 120]:
+                del self._flash[k]
+        return h if time.time() - t < 120 else ""
 
     def request_quit(self) -> None:
         if self.on_quit:
@@ -117,27 +125,34 @@ class App:
             else:
                 cached = None
         if cached is None:
-            out = []
-            from ..normalize import MediaResolver
-            resolver = MediaResolver.for_library(self.library)
+            out, profiles = [], []
             for d in archive_dirs(self.library):
                 info: dict[str, Any] = {"nick": d.name, "name": d.name, "avatar": None, "comments": 0, "posts": 0,
-                                        "built": False, "guard": peek_meta(d, "guard")}
+                                        "built": False, "guard": peek_meta(d, META_GUARD)}
                 arch = Archive(d, self.library)
+                prof: dict = {}
                 db = open_view(arch)
+                post_comments = 0
                 if db is not None:
                     try:
                         m = view_meta(db)
                         prof = m.get("profile") or {}
-                        info.update(name=prof.get("name") or d.name, comments=m["counts"]["my_comments"],
-                                    posts=m["counts"]["posts"], built=True, built_at=m.get("built_at"),
-                                    avatar=avatar_src(resolver, prof.get("avatar")))
+                        info.update(comments=m["counts"]["my_comments"], posts=m["counts"]["posts"], built=True,
+                                    built_at=m.get("built_at"))
+                        post_comments = m["counts"].get("post_comments") or 0
                     finally:
                         db.close()
                 elif arch.raw_profile().exists():
                     prof = read_json_gz(arch.raw_profile())
-                    info.update(name=prof.get("name") or d.name, avatar=avatar_src(resolver, prof.get("avatar")))
+                info["name"] = prof.get("name") or d.name
+                # the comment pages exist while the archive keeps comments (or still has some)
+                info["comments_on"] = comments_kept(arch.settings()) or bool(info["comments"] or post_comments)
                 out.append(info)
+                profiles.append(prof)
+            # only the few avatar files, not the whole media catalog (this runs every few seconds)
+            resolver = MediaResolver(lookup(self.library, [avatar_key(p.get("avatar")) for p in profiles]))
+            for info, prof in zip(out, profiles):
+                info["avatar"] = avatar_src(resolver, prof.get("avatar"))
             with self.lock:
                 self._accounts = (time.time(), out)
             cached = out
@@ -150,8 +165,8 @@ class App:
         arch = self.archive(nick)
         if arch is None or not view_ready(arch):
             return None
-        cfg = arch.root / "reactions.config.json"
-        stamp = (arch.view_path.stat().st_mtime, cfg.stat().st_mtime if cfg.exists() else 0)
+        cfg = arch.root / CONFIG_NAME
+        stamp = tuple(p.stat().st_mtime if p.exists() else 0 for p in (arch.view_path, cfg, arch.settings_path))
         with self.lock:
             hit = self._views.get(nick)
             if hit and hit[0] == stamp:
@@ -159,9 +174,13 @@ class App:
         v = viewer.ArchiveView(arch)
         with self.lock:
             self._views[nick] = (stamp, v)
-            for k in [k for k in self._pages if k[0] == nick]:
-                del self._pages[k]
+            self._drop_pages(nick)
         return v
+
+    def _drop_pages(self, nick: str) -> None:
+        """Cached pages of one archive (under self.lock)."""
+        for k in [k for k in self._pages if k[0] == nick]:
+            del self._pages[k]
 
     def invalidate(self, nick: str | None = None) -> None:
         with self.lock:
@@ -171,8 +190,7 @@ class App:
                 self._pages.clear()
             else:
                 self._views.pop(nick, None)
-                for k in [k for k in self._pages if k[0] == nick]:
-                    del self._pages[k]
+                self._drop_pages(nick)
 
     def cached(self, key: tuple, build: Any) -> str | None:
         with self.lock:
@@ -196,11 +214,11 @@ class App:
         return accs[0]["nick"] if accs else None
 
     def page(self, title: str, body: str, nick: str | None = None, active: str = "", wide: bool = False,
-             extra: str = "") -> str:
+             extra: str = "", bare: bool = False) -> str:
         cur = self.current_nick(nick)
         current = self.account(cur) if cur else None
         return self.shell.page(title, body, current=current, accounts=self.accounts(), active=active, wide=wide,
-                               extra=extra)
+                               extra=extra, bare=bare)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -230,6 +248,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def html(self, text: str, code: int = 200, headers: dict | None = None) -> None:
+        if self.command == "GET" and (self.headers.get("Sec-Fetch-Mode") or "navigate") == "navigate":
+            note = self.app.take_flash(urllib.parse.urlsplit(self.path).path)
+            if note:   # where the page keeps its notices, else at the top of the page
+                text = (text.replace(FLASH, note, 1) if FLASH in text else
+                        re.sub(r"(<main[^>]*>)", lambda m: m.group(1) + note, text, count=1))
+        text = text.replace(FLASH, "")
         h = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin",
              "X-Frame-Options": "DENY"}
         h.update(headers or {})
@@ -239,7 +263,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_body(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8",
                        {"Cache-Control": "no-store"})
 
-    def redirect(self, url: str, code: int = 303) -> None:
+    def redirect(self, url: str, code: int = 303, flash: str = "") -> None:
+        """`flash`: HTML the next page view of `url` shows once (a snackbar or a banner) - the outcome of a form."""
+        if flash:
+            self.app.flash(urllib.parse.urlsplit(url).path, flash)
         self.send_response(code)
         self.send_header("Location", url)
         self.send_header("Content-Length", "0")
@@ -346,7 +373,12 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/jobs/(\d+)", path)
             if m:
                 j = self.app.jobs.get(int(m.group(1)))
-                return self.json(j.snapshot()) if j else self.json({"error": "нет такого задания"}, 404)
+                if not j:
+                    return self.json({"error": "нет такого задания"}, 404)
+                snap = j.snapshot()
+                if j.kind == "sync" and j.state == RUNNING:   # the sync tab tells when DTF asks everyone to wait
+                    snap["net"] = self.app.net.state()["api"]
+                return self.json(snap)
             if path == "/api/diagnostics":
                 return self.json(self.app.diag)
             if path == "/":
@@ -393,6 +425,9 @@ class Handler(BaseHTTPRequestHandler):
         v = app.view(nick)
         if v is None:  # first sync still running / never built
             return self.redirect(Links(nick).sync(), 302)
+        if ((sub == "/comments" or sub.startswith(("/c/", "/go/c/")))
+                and not (app.account(nick) or {}).get("comments_on", True)):
+            return self.redirect(Links(nick).home(), 302)   # an archive of posts only has no comment pages
         m = re.fullmatch(r"/go/c/(\d+)", sub)
         if m:
             target = viewer.page_go(v, int(m.group(1)))
@@ -412,7 +447,9 @@ class Handler(BaseHTTPRequestHandler):
                 page = int(qs("page", "1") or 1) if qs("page", "1").isdigit() else 1
                 gs = q.get("g") or ["1"]  # checkbox + hidden fallback: "1" when checked
                 res, active = viewer.page_search(v, qs("q"), qs("t"), qs("y"), qs("s", "rank"), page,
-                                                 exact=qs("exact") == "1", group="1" in gs), "search"
+                                                 exact=qs("exact") == "1", group="1" in gs,
+                                                 rebuild=lambda action: app.shell.form(action, btn("Пересобрать", "text",
+                                                                                                   "restart_alt"))), "search"
             elif sub == "/reactions":
                 res, active = viewer.page_reactions(v, lambda action, inner: app.shell.form(action, inner)), "reactions"
             else:
@@ -474,12 +511,15 @@ class Handler(BaseHTTPRequestHandler):
             nick = str(body.get("nick") or "")
             if not NICK_RE.match(nick):
                 return self.json({"error": "неверное имя архива"}, 400)
+            kind = str(body.get("kind") or "sync")
+            if kind not in KINDS:
+                return self.json({"error": f"неизвестный вид задания: {kind}"}, 400)
             (self.app.library / nick / ".state").mkdir(parents=True, exist_ok=True)
             params = {"reason": "cli", "full": bool(body.get("full")), "accept": bool(body.get("accept"))}
             if body.get("user"):
                 params["user"] = str(body["user"])
-            job = self.app.jobs.submit(nick, "render" if body.get("kind") == "render" else "sync", **params)
-            self.app.invalidate(nick)
+            job = self.app.jobs.submit(nick, kind, **params)
+            self.app.invalidate()
             return self.json(job.snapshot())
         m = re.fullmatch(r"/api/jobs/(\d+)/cancel", path)
         if m:
@@ -512,7 +552,7 @@ def run_file(library: Path) -> Path:
     return library / ".state" / "app.run.json"
 
 
-def find_running(library: Path, port: int = 8765) -> dict | None:
+def find_running(library: Path, port: int = DEFAULT_PORT) -> dict | None:
     """A LDTF already serving this library: {"url", "port", "token"?}; checks the run file, then the default port."""
     rf = run_file(library.resolve())
     try:
@@ -526,16 +566,25 @@ def find_running(library: Path, port: int = 8765) -> dict | None:
     return None
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """A request the browser dropped (a lazy picture scrolled away, a closed tab) is not an error of the app."""
+        if isinstance(sys.exc_info()[1], (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
 class Runtime:
     """The running app: HTTP server thread + scheduler; `stop()` shuts everything down gracefully."""
 
-    def __init__(self, library: Path, port: int = 8765, scheduler_delay: float = 10.0):
+    def __init__(self, library: Path, port: int = DEFAULT_PORT, scheduler_delay: float = 10.0):
         self.port = _free_port(port)
         self.app = App(library, self.port)
         self.app.scheduler.first_delay = scheduler_delay
         Handler.app = self.app
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
-        self.httpd.daemon_threads = True
+        self.httpd = Server(("127.0.0.1", self.port), Handler)
         self.url = f"http://127.0.0.1:{self.port}/"
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.5},
                                        name="http", daemon=True)
@@ -544,6 +593,7 @@ class Runtime:
     def start(self, scheduler: bool = True) -> "Runtime":
         _clean_media_tmp(self.app.library)
         self.thread.start()
+        self.app.scheduling = scheduler
         if scheduler:
             self.app.scheduler.start()
         write_json(run_file(self.app.library), {"pid": os.getpid(), "port": self.port, "token": self.app.token,
@@ -551,10 +601,29 @@ class Runtime:
         try:
             from ..winintegration import refresh_autostart
             refresh_autostart()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001 - a stale autostart entry must not stop the app
+            log.warning(f"[app] не удалось обновить автозапуск: {e}")
+        self._catch_up()
         log.info(f"LDTF {__version__} работает: {self.url} (архивы: {self.app.library})")
         return self
+
+    def _catch_up(self) -> None:
+        """Work left from the previous run: comments of an archive switched to posts only, archives built by an older
+        LDTF (rebuilt one at a time, unless a sync is due now - it builds anyway), a postponed media cleanup."""
+        now = time.time()
+        for d in archive_dirs(self.app.library):
+            arch = Archive(d, self.app.library)
+            try:
+                if pending_drop(arch):
+                    self.app.jobs.submit(d.name, "purge", reason="manual")
+                elif view_outdated(arch):
+                    due = self.app.next_run(d.name)
+                    if due is None or due > now + 60:
+                        self.app.jobs.submit(d.name, "render", reason="update")
+            except Exception:  # noqa: BLE001 - one damaged archive must not stop the app
+                log.exception(f"[app] @{d.name}: проверка при запуске")
+        if gc_pending(self.app.library).exists():   # a cleanup postponed while syncs were running
+            self.app.jobs.want_gc()
 
     def stop(self, timeout: float = 20.0) -> None:
         if self.stopped.is_set():
@@ -589,7 +658,7 @@ def _clean_media_tmp(library: Path) -> None:
             pass
 
 
-def serve(library: Path, port: int = 8765, open_browser: bool = False, auto_sync: bool = True) -> None:
+def serve(library: Path, port: int = DEFAULT_PORT, open_browser: bool = False, auto_sync: bool = True) -> None:
     """Console mode: the server runs until Ctrl+C / the window is closed / "Остановить LDTF" in the app."""
     running = find_running(library, port)
     if running:

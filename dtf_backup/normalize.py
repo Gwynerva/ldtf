@@ -4,21 +4,21 @@ link unwrapping/rewriting, mentions and media resolution."""
 from __future__ import annotations
 
 import html
-import json
 import re
 import urllib.parse
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
 
-from .api import MEDIA, SITE
-from .media import media_key
+from .api import MEDIA, SITE, media_url, post_url
+from .media import load_media_index, media_key
 
 REDIRECT_RE = re.compile(r"^https?://api\.dtf\.ru/v[\d.]+/redirect\?(.+)$", re.I)
 POST_URL_RE = re.compile(r"^https?://(?:www\.|m\.)?dtf\.ru/(?:[^?#]*/)?(\d{3,})(?:-[^/?#]*)?/?(\?[^#]*)?(#.*)?$", re.I)
 URL_RE = re.compile(r"(https?://[^\s<>\"'«»]+)", re.I)
 MENTION_RE = re.compile(r'<mention\s+([^>]*)>(.*?)</mention>', re.S | re.I)
 ATTR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
+EXT_LINK = ' target="_blank" rel="noopener"'   # attributes of a link that leaves the archive
 
 
 def unwrap_url(url: str) -> str:
@@ -96,7 +96,6 @@ class _Conv(HTMLParser):
         self.txt: list[str] = []
         self.stack: list[str] = []
         self.skip = 0
-        self.links: list[str] = []
         self.a_href: list[str | None] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -124,8 +123,7 @@ class _Conv(HTMLParser):
             if href and self.linker:
                 href, local = self.linker.href(href)
             if href:
-                self.links.append(href)
-                ext = "" if local or href.startswith("#") else ' target="_blank" rel="noopener"'
+                ext = "" if local or href.startswith("#") else EXT_LINK
                 self.h.append(f'<a href="{html.escape(href)}"{ext}>')
             else:
                 self.h.append("<a>")
@@ -199,10 +197,10 @@ class _Conv(HTMLParser):
 
 
 class Rich:
-    __slots__ = ("html", "md", "text", "links")
+    __slots__ = ("html", "md", "text")
 
-    def __init__(self, html_: str, md: str, text: str, links: list[str]):
-        self.html, self.md, self.text, self.links = html_, md, text, links
+    def __init__(self, html_: str, md: str, text: str):
+        self.html, self.md, self.text = html_, md, text
 
 
 def convert_html(src: str | None, linker: Linker | None = None) -> Rich:
@@ -212,7 +210,7 @@ def convert_html(src: str | None, linker: Linker | None = None) -> Rich:
     md = re.sub(r"\n{3,}", "\n\n", "".join(c.md)).strip()
     text = re.sub(r"[ \t]+\n", "\n", "".join(c.txt))
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return Rich("".join(c.h), md, text, c.links)
+    return Rich("".join(c.h), md, text)
 
 
 def html_to_text(src: str | None) -> str:
@@ -233,7 +231,7 @@ def _linkify(escaped: str, linker: Linker | None) -> str:
         local = False
         if linker:
             href, local = linker.href(href)
-        ext = "" if local else ' target="_blank" rel="noopener"'
+        ext = "" if local else EXT_LINK
         return f'<a href="{html.escape(href)}"{ext}>{html.escape(url)}</a>{html.escape(trail)}'
     return URL_RE.sub(rep, escaped)
 
@@ -252,7 +250,7 @@ def _inline(raw: str, linker: Linker | None) -> tuple[str, str, str]:
         attrs = dict(ATTR_RE.findall(m.group(1)))
         name = html.unescape(re.sub(r"<[^>]+>", "", m.group(2)))
         href = profile_url(attrs["id"]) if attrs.get("id") else f"{SITE}/{attrs.get('nickname', '')}"
-        h.append(f'<a class="mention" href="{html.escape(href)}" target="_blank" rel="noopener">@{html.escape(name.lstrip("@"))}</a>')
+        h.append(f'<a class="mention" href="{html.escape(href)}"{EXT_LINK}>@{html.escape(name.lstrip("@"))}</a>')
         md.append(f"[@{name.lstrip('@')}]({href})")
         txt.append("@" + name.lstrip("@"))
         pos = m.end()
@@ -294,7 +292,7 @@ def comment_text(raw: str | None, linker: Linker | None = None) -> Rich:
             hs.append("".join("<p>" + "<br>".join(pp) + "</p>" for pp in paras if pp))
             mds.append("  \n".join(p[1] for p in parts).strip())
             txts.append("\n".join(p[2] for p in parts).strip())
-    return Rich("".join(hs), "\n\n".join(m for m in mds if m).strip(), "\n".join(txts).strip(), [])
+    return Rich("".join(hs), "\n\n".join(m for m in mds if m).strip(), "\n".join(txts).strip())
 
 
 
@@ -315,23 +313,19 @@ class MediaResolver:
 
     def __init__(self, index: dict[str, dict] | None = None):
         self.index: dict[str, dict] = index or {}
-        self.used: dict[str, set[str]] = {}
 
     @classmethod
     def for_library(cls, library: Path) -> "MediaResolver":
-        from .media import load_media_index
         return cls(load_media_index(library))
 
     def local(self, key: str | None) -> dict | None:
-        if not key:
-            return None
-        e = self.index.get(key)
-        if e and not e.get("missing"):
-            return e
-        return None
+        e = self.index.get(key) if key else None
+        return e if e and not e.get("missing") else None
 
-    def use(self, key: str, owner: str) -> None:
-        self.used.setdefault(key, set()).add(owner)
+    def gone(self, key: str | None) -> bool:
+        """DTF answered 403/404/410/451 when the file was to be downloaded: it isn't in the archive and won't load."""
+        e = self.index.get(key) if key else None
+        return bool(e and e.get("missing"))
 
 
 def _int(v: Any) -> int | None:
@@ -342,7 +336,7 @@ def _int(v: Any) -> int | None:
         return None
 
 
-def media_info(obj: Any, resolver: MediaResolver, owner: str | None = None) -> dict | None:
+def media_info(obj: Any, resolver: MediaResolver) -> dict | None:
     """Normalize a DTF media object ({"type": "image"|"movie"|..., "data": {...}}) or a bare data dict."""
     if not isinstance(obj, dict):
         return None
@@ -351,8 +345,6 @@ def media_info(obj: Any, resolver: MediaResolver, owner: str | None = None) -> d
     key = media_key(data.get("uuid"))
     if not key:
         return None
-    if owner:
-        resolver.use(key, owner)
     loc = resolver.local(key)
     ftype = (data.get("type") or "").lower()
     mime = (loc or {}).get("mime") or ""
@@ -362,17 +354,29 @@ def media_info(obj: Any, resolver: MediaResolver, owner: str | None = None) -> d
             "image" if mime.startswith("image/") else "file"
     else:
         kind = "video" if animated else "audio" if otype == "audio" else "file" if otype == "file" else "image"
-    remote = key if key.startswith("http") else f"{MEDIA}/{key}/"
+    remote = media_url(key)
     if kind == "video" and not key.startswith("http"):
         remote = f"{MEDIA}/{key}/-/format/mp4/"
     return {
         "key": key, "kind": kind, "local": loc["path"] if loc else None, "remote": remote,
+        "gone": not loc and resolver.gone(key),
         "width": _int(data.get("width")), "height": _int(data.get("height")),
         "duration": data.get("duration"), "hasAudio": bool(data.get("has_audio")),
         "isGif": ftype == "gif" and not data.get("has_audio"),
         "size": (loc or {}).get("size") or _int(data.get("size")), "format": ftype or None,
         "name": data.get("name") or data.get("title") or None,
     }
+
+
+def post_ref(d: Any, names: tuple[str, ...] = ("author", "subsite")) -> dict | None:
+    """The post a repost or an embed points to: {id, url, title, author, date}; `names`: where to look for the author's
+    name first (a repost names the original author, an embed its blog)."""
+    if not isinstance(d, dict):
+        return None
+    pid = d.get("original_id")
+    who = next((n for n in ((d.get(k) or {}).get("name") for k in names) if n), "")
+    return {"id": pid, "url": d.get("url") or (post_url(pid) if pid else ""), "title": d.get("title"), "author": who,
+            "date": d.get("date")}
 
 
 def media_src(m: dict, root_rel: str) -> str:
@@ -398,25 +402,6 @@ def external_video_url(data: dict) -> tuple[str | None, str | None]:
         url = f(vid, data.get("time")) if f and vid else (data.get("url") or None)
         return name, url
     return None, None
-
-
-def find_first(obj: Any, pred: Callable[[str, Any], bool], depth: int = 6) -> Any:
-    if depth < 0:
-        return None
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if pred(k, v):
-                return v
-        for v in obj.values():
-            r = find_first(v, pred, depth - 1)
-            if r is not None:
-                return r
-    elif isinstance(obj, list):
-        for v in obj:
-            r = find_first(v, pred, depth - 1)
-            if r is not None:
-                return r
-    return None
 
 
 def slug_from_url(url: str | None) -> str:

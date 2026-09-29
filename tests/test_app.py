@@ -212,22 +212,40 @@ class AppTest(unittest.TestCase):
         from unittest import mock
         code, body, _ = self.get("/app")
         self.assertEqual(code, 200)
-        self.assertIn("Одновременно архивов", body)
+        for knob in ("Одновременно архивов", "Запросов к DTF", "Параллельных"):   # the app tunes the network itself
+            self.assertNotIn(knob, body)
         token = re.search(r'name="_csrf" value="([^"]+)"', body).group(1)
         with mock.patch("dtf_backup.winintegration.available", lambda: False):   # never touch the real registry
-            self.assertEqual(self.post("/app", {"_csrf": token, "max_parallel": "3", "api_rate": "7", "api_conn": "3",
-                                                "media_conn": "5", "autosync": "1", "notify": "1"}), 200)
-        self.assertEqual((self.app.jobs.max_parallel, self.app.net.api.max), (3, 3))   # applied without restart
-        self.assertEqual(self.app.net.api.max_rate, 7.0)
+            self.assertEqual(self.post("/app", {"_csrf": token, "autosync": "1", "notify": "1"}), 303)
+            code, body, _ = self.get("/app")
+        self.assertIn("Настройки сохранены", body)                    # the outcome, once
+        self.assertNotIn("Настройки сохранены", self.get("/app")[1])
         code, body, _ = self.get("/u/tester/settings")
         self.assertIn("Опасная зона", body)
         self.assertIn('name="schedule"', body)
+        self.assertNotIn("refresh_days", body)                         # a tuning knob: settings.json / CLI only
         self.assertEqual(self.post("/u/tester/settings", {"_csrf": token, "schedule": "daily", "schedule_time": "05:30",
-                                                          "schedule_hours": "12", "refresh_days": "30", "media": "1"}),
-                         200)
+                                                          "schedule_hours": "12", "media": "1", "scope": "all"}), 303)
         self.assertEqual(self.arch.settings()["schedule"], "daily")
         code, body, _ = self.get("/u/tester/settings")
-        self.assertIn("Следующая синхронизация", body)
+        self.assertIn("Следующая автосинхронизация", body)
+        self.assertIn("Настройки сохранены", body)
+
+    def test_enter_on_app_settings_saves(self) -> None:
+        """The first submit button of the settings form is "Сохранить": the shortcut buttons belong to a form of their
+        own, so Enter in a field never creates a shortcut (and never drops the edits)."""
+        import re
+        from unittest import mock
+        with mock.patch("dtf_backup.winintegration.available", lambda: True), \
+                mock.patch("dtf_backup.winintegration.autostart_enabled", lambda: False):
+            _, body, _ = self.get("/app")
+        form = re.search(r'<form method="post" action="/app"[^>]*>(.*?)</form>', body, re.S).group(1)
+        buttons = re.findall(r"<button[^>]*>[^<]*(?:<svg.*?</svg>)?[^<]*", form, re.S)
+        self.assertTrue(any("shortcut" in b for b in buttons), buttons)
+        self.assertTrue(all('form="shortcuts"' in b for b in buttons if "formaction" in b), buttons)
+        own = [b for b in buttons if 'form="' not in b]   # the buttons whose form is this one: the first is the default
+        self.assertIn("Сохранить", own[0])
+        self.assertIn('<form method="post" action="/app/shortcut" id="shortcuts">', body)
 
     def test_guard_ui(self) -> None:
         from unittest import mock
@@ -264,8 +282,6 @@ class AppTest(unittest.TestCase):
             with mock.patch.object(self.app.jobs, "submit", lambda *a, **k: calls.append((a, k))):
                 self.assertIn(self.post("/u/tester/guard", {"_csrf": self.app.csrf, "action": "accept"}), (302, 303))
                 self.assertEqual(calls[-1][1].get("accept"), True)
-                self.assertIn(self.post("/u/tester/guard", {"_csrf": self.app.csrf, "action": "pause"}), (302, 303))
-                self.assertEqual(self.arch.settings()["schedule"], "off")
                 self.assertIn(self.post("/u/tester/guard", {"_csrf": self.app.csrf, "action": "retry"}), (302, 303))
                 self.assertIsNone(self.arch.get_meta("guard"))
                 self.assertEqual(len(calls), 2)
@@ -361,24 +377,29 @@ class AppTest(unittest.TestCase):
         self.assertEqual(self.post("/u/tester/render", {"_csrf": self.app.csrf},
                                    {"Origin": "https://evil.example"}), 403)                     # foreign site
         self.assertEqual(self.post("/u/tester/settings", {"_csrf": self.app.csrf, "workers": "3",
-                                                          "auto_sync_hours": "0"}), 200)
-        self.assertEqual(self.arch.settings()["workers"], 3)
+                                                          "auto_sync_hours": "0"}), 303)
+        self.assertNotIn("workers", self.arch.settings())
         self.assertEqual(self.post("/u/tester/delete", {"_csrf": self.app.csrf, "confirm": "wrong"}), 200)
         self.assertTrue(self.arch.root.exists())
 
     # ---------------------------------------------------------------- jobs
     def test_jobs_queue_and_cancel(self) -> None:
         jm = self.app.jobs
-        j1 = jm.submit("tester", "render")
-        j2 = jm.submit("tester", "sync")
-        self.assertIs(jm.submit("tester", "render"), j1)       # no duplicates while queued/running
-        self.assertTrue(jm.cancel(j2.id))
+        with jm.cond:   # the queue holds still while we look (the workers wait for this lock)
+            j1 = jm.submit("tester", "render")
+            self.assertIs(jm.submit("tester", "render"), j1)       # no duplicates while queued/running
+            j2 = jm.submit("tester", "sync")
+            self.assertNotIn(j1, jm.queue)                        # a sync builds the archive: the waiting rebuild goes
+            self.assertIs(jm.submit("tester", "render"), j2)       # and a rebuild asked meanwhile is that sync
+            self.assertTrue(jm.cancel(j2.id))
+        self.assertEqual(j2.state, "cancelled")
+        j3 = jm.submit("tester", "render")
         for _ in range(240):
-            if j1.state not in ("queued", "running"):
+            if j3.state not in ("queued", "running"):
                 break
             time.sleep(0.25)
-        self.assertEqual(j1.state, "done", j1.snapshot())
-        self.assertEqual(j2.state, "cancelled")
+        self.assertEqual(j3.state, "done", j3.snapshot())
+        self.assertEqual([s["key"] for s in j3.snapshot()["stages"]], ["build"])
 
 
 class GcTest(unittest.TestCase):
@@ -394,10 +415,9 @@ class GcTest(unittest.TestCase):
             b.close()
             import shutil
             shutil.rmtree(lib / "one")
-            self.assertEqual(gc_media(lib), (0, 0))   # still used by "two"
+            self.assertEqual(gc_media(lib), {"status": "done", "files": 0, "bytes": 0, "reason": ""})   # used by "two"
             shutil.rmtree(lib / "two")
-            files, size = gc_media(lib)
-            self.assertEqual(files, 1)
+            self.assertEqual(gc_media(lib)["files"], 1)
             self.assertFalse(any((lib / "media").rglob("*.jpg")))
 
 

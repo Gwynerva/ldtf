@@ -15,11 +15,10 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .api import SITE
 from .media import collect_media
 from .web.icons import icon
-from .normalize import (Linker, MediaResolver, convert_html, external_video_url, media_info,
-                        media_src, unwrap_url)
+from .normalize import (EXT_LINK, Linker, MediaResolver, convert_html, external_video_url, media_info,
+                        media_src, post_ref, unwrap_url)
 
 E = html.escape
 
@@ -50,38 +49,80 @@ class Ctx:
 
 
 # ------------------------------------------------------------------ media helpers
+# A file that is not in the archive is shown from DTF (data-remote). If that fails - no network, the CDN is down, the
+# file is gone - app.js puts a placeholder in its place; a file DTF already answered 404 for is not even requested.
+STUB_ICONS = {"image": "image", "video": "movie", "audio": "graphic_eq", "file": "attach_file"}
+STUB_TEXT = {"net": ("Нет в архиве", "и не загрузилось с DTF"), "gone": ("Удалено с DTF", "в архив не попало")}
+
+
+def remote_attrs(m: dict) -> str:
+    """data-remote="<kind>" on a file shown from DTF; data-failed="gone" when DTF already reported it deleted."""
+    if m.get("local"):
+        return ""
+    if m.get("gone"):
+        return f' data-remote="{E(m["kind"])}" data-failed="gone"'
+    return f' data-remote="{E(m["kind"])}" title="Файла нет в архиве — показан с DTF"'
+
+
+def src_attr(m: dict, src: str) -> str:
+    """src, or data-src for a file known to be gone (loaded only when the user asks to try)."""
+    return f' data-src="{src}"' if m.get("gone") and not m.get("local") else f' src="{src}"'
+
+
+def media_stub(kind: str, reason: str = "net", w: int | None = None, h: int | None = None, action: bool = True) -> str:
+    """Placeholder in place of a file that is neither in the archive nor loadable from DTF (app.js clones it from the
+    page's "mstub" template for load failures). `action`: a retry button (not inside links: there the click retries)."""
+    title, sub = STUB_TEXT[reason]
+    box = f' style="--w:{int(w)};--h:{int(h)}"' if w and h and kind in ("image", "video") else ""   # size: style.css
+    btn = (f'<button class="btn text sm mstub-retry" type="button">{icon("restart_alt")}'
+           f'{"Попробовать загрузить" if reason == "gone" else "Повторить"}</button>') if action else ""
+    return (f'<span class="mstub" data-kind="{E(kind)}" data-reason="{reason}"{box}>'
+            f'<span class="mstub-ic">{icon(STUB_ICONS.get(kind, "image"))}</span><span class="mstub-t">{E(title)}</span>'
+            f'<span class="mstub-s">{E(sub)}</span>{btn}</span>')
+
+
 def media_html(m: dict | None, ctx: Ctx, cls: str = "", link: bool = True) -> str:
+    """`link=False`: the file sits inside another link (a link card, an external video); else pictures open the
+    lightbox."""
     if not m:
         return ""
-    src = E(media_src(m, ctx.root_rel))
-    remote = "" if m.get("local") else ' data-remote="1" title="Файл не сохранён локально — загружается с сервера DTF"'
+    href = E(media_src(m, ctx.root_rel))
+    src = src_attr(m, href)
+    remote = remote_attrs(m)
     wh = dims = ""
     if m.get("width") and m.get("height"):
         wh = f' width="{int(m["width"])}" height="{int(m["height"])}"'
         dims = f' data-pswp-width="{int(m["width"])}" data-pswp-height="{int(m["height"])}"'
+    gone = m.get("gone") and not m.get("local")
+
+    def stub(action: bool) -> str:
+        return media_stub(m["kind"], "gone", m.get("width"), m.get("height"), action) if gone else ""
     if m["kind"] == "video":
         if m.get("hasAudio"):
-            return f'<video class="media {cls}" controls preload="metadata" src="{src}"{wh}{remote}></video>'
-        vid = (f'<video class="media gifv {cls}" muted loop playsinline preload="metadata" data-autoplay '
-               f'src="{src}"{wh}{remote}></video>')
+            return f'<video class="media {cls}" controls preload="metadata"{src}{wh}{remote}></video>{stub(True)}'
+        vid = (f'<video class="media gifv {cls}" muted loop playsinline preload="metadata" data-autoplay'
+               f'{src}{wh}{remote}></video>{stub(False)}')
         # gif-like videos open in the PhotoSwipe lightbox too (as an html slide)
-        return f'<a class="pswp-item" href="{src}" data-pswp-video{dims} target="_blank">{vid}</a>' if link else vid
+        return f'<a class="pswp-item" href="{href}" data-pswp-video{dims}{EXT_LINK}>{vid}</a>' if link else vid
     if m["kind"] == "audio":
-        return f'<audio class="media {cls}" controls preload="none" src="{src}"{remote}></audio>'
+        return f'<audio class="media {cls}" controls preload="none"{src}{remote}></audio>{stub(True)}'
     if m["kind"] == "file":
         name = E(m.get("name") or m["key"])
-        return f'<a class="file {cls}" href="{src}" download{remote}>{icon("attach_file")}{name}</a>'
-    img = f'<img class="media {cls}" loading="lazy" src="{src}"{wh} alt=""{remote}>'
-    return f'<a class="pswp-item" href="{src}"{dims} target="_blank">{img}</a>' if link else img
+        note = f' <span class="muted small">({STUB_TEXT["gone"][0].lower()})</span>' if gone else ""
+        return f'<a class="file {cls}" href="{href}" download{remote}>{icon("attach_file")}{name}</a>{note}'
+    img = f'<img class="media {cls}" loading="lazy"{src}{wh} alt=""{remote}>{stub(False)}'
+    return f'<a class="pswp-item" href="{href}"{dims}{EXT_LINK}>{img}</a>' if link else img
 
 
 def media_thumb(m: dict, ctx: Ctx) -> str:
     """Tile content for the gallery header: the file itself, fitted into a square (object-fit: contain)."""
-    src = E(media_src(m, ctx.root_rel))
+    src = src_attr(m, E(media_src(m, ctx.root_rel))) + remote_attrs(m)
+    stub = media_stub(m["kind"], "gone", action=False) if m.get("gone") and not m.get("local") else ""
     if m["kind"] == "video":
-        return f'<video muted playsinline preload="metadata" src="{src}"></video><span class="g-play">{icon("play_arrow")}</span>'
+        return (f'<video muted playsinline preload="metadata"{src}></video>{stub}'
+                f'<span class="g-play">{icon("play_arrow")}</span>')
     if m["kind"] == "image":
-        return f'<img loading="lazy" src="{src}" alt="">'
+        return f'<img loading="lazy"{src} alt="">{stub}'
     return f'<span class="g-file">{E(m["kind"])}</span>'
 
 
@@ -99,8 +140,8 @@ def media_md(m: dict | None, ctx: Ctx, alt: str = "") -> str:
 def media_norm(m: dict | None) -> dict | None:
     if not m:
         return None
-    return {k: m[k] for k in ("key", "kind", "local", "remote", "width", "height", "duration", "hasAudio", "format", "size")
-            if m.get(k) not in (None, False)}
+    return {k: m[k] for k in ("key", "kind", "local", "remote", "gone", "width", "height", "duration", "hasAudio",
+                              "format", "size") if m.get(k) not in (None, False)}
 
 
 def rich(text: str | None, ctx: Ctx) -> tuple[str, str, str]:
@@ -118,7 +159,7 @@ def json_spoiler(obj: Any, label: str = "Показать JSON") -> str:
 def all_media(obj: Any, ctx: Ctx) -> list[dict]:
     out = []
     for key, _sig, kind in collect_media(obj):
-        m = media_info({"uuid": key, "type": kind}, ctx.resolver, ctx.owner)
+        m = media_info({"uuid": key, "type": kind}, ctx.resolver)
         if m:
             out.append(m)
     return out
@@ -178,7 +219,7 @@ def b_media(d: dict, ctx: Ctx) -> Result:
     figs, mds, norm = [], [], []
     good: list[tuple[dict, str, str]] = []
     for it in items:
-        m = media_info(it.get("image"), ctx.resolver, ctx.owner) if isinstance(it, dict) else None
+        m = media_info(it.get("image"), ctx.resolver) if isinstance(it, dict) else None
         cap_h, cap_md, cap_t = rich(it.get("title"), ctx) if isinstance(it, dict) and it.get("title") else ("", "", "")
         if m is None:
             figs.append(f'<figure class="bad">{json_spoiler(it, "Элемент без медиа — JSON")}</figure>')
@@ -211,18 +252,18 @@ def b_media(d: dict, ctx: Ctx) -> Result:
 def _video_parts(v: dict, ctx: Ctx) -> tuple[str, str, dict]:
     vd = v.get("data") if isinstance(v.get("data"), dict) else v
     service, url = external_video_url(vd)
-    thumb = media_info(vd.get("thumbnail"), ctx.resolver, ctx.owner) if vd.get("thumbnail") else None
+    thumb = media_info(vd.get("thumbnail"), ctx.resolver) if vd.get("thumbnail") else None
     if service:
         th = media_html(thumb, ctx, link=False) if thumb else '<div class="noimg"></div>'
         label = {"youtube": "YouTube", "vimeo": "Vimeo", "coub": "Coub", "vk": "VK Видео", "twitch": "Twitch",
                  "rutube": "RuTube"}.get(service, service)
         href = E(url or "#")
-        h = (f'<a class="ext-video" href="{href}" target="_blank" rel="noopener">{th}'
+        h = (f'<a class="ext-video" href="{href}"{EXT_LINK}>{th}'
              f'<span class="play">{icon("play_arrow")}</span><span class="svc">{E(label)}</span></a>')
         md = f"[{media_md(thumb, ctx, label) if thumb else '▶ ' + label}]({url})" if url else f"▶ {label}"
         return h, md, {"service": service, "url": url, "id": (vd.get("external_service") or {}).get("id"),
                        "thumbnail": media_norm(thumb)}
-    m = media_info(v, ctx.resolver, ctx.owner)
+    m = media_info(v, ctx.resolver)
     if m:
         m["kind"] = "video" if m["kind"] == "image" and m.get("format") in ("mp4", "gif") else m["kind"]
         return media_html(m, ctx), media_md(m, ctx), {"media": media_norm(m), "thumbnail": media_norm(thumb)}
@@ -240,7 +281,7 @@ def b_video(d: dict, ctx: Ctx) -> Result:
 def _link_card(ld: dict, ctx: Ctx, cls: str = "b-link") -> tuple[str, str, dict]:
     url = unwrap_url(ld.get("url") or "")
     href, local = ctx.linker.href(url)
-    img = media_info(ld.get("image"), ctx.resolver, ctx.owner) if ld.get("image") else None
+    img = media_info(ld.get("image"), ctx.resolver) if ld.get("image") else None
     is_icon = bool(img and (img["key"].startswith("http") or (img.get("width") or 0) <= 64))
     title = ld.get("title") or ld.get("hostname") or url
     desc = ld.get("description") or ""
@@ -248,7 +289,7 @@ def _link_card(ld: dict, ctx: Ctx, cls: str = "b-link") -> tuple[str, str, dict]
     pic = ""
     if img:
         pic = f'<span class="lc-img{" icon" if is_icon else ""}">{media_html(img, ctx, link=False)}</span>'
-    ext = "" if local else ' target="_blank" rel="noopener"'
+    ext = "" if local else EXT_LINK
     h = (f'<a class="{cls}" href="{E(href)}"{ext}>{pic}<span class="lc-body"><span class="lc-title">{E(title)}</span>'
          f'{f"<span class=lc-desc>{E(desc)}</span>" if desc else ""}<span class="lc-host">{E(host)}</span></span></a>')
     md = f"🔗 [{title}]({url})" + (f" — {desc}" if desc else "")
@@ -267,15 +308,14 @@ def b_link(d: dict, ctx: Ctx) -> Result:
 def b_osnova_embed(d: dict, ctx: Ctx) -> Result:
     oe = d.get("osnovaEmbed") or {}
     od = oe.get("data") if isinstance(oe.get("data"), dict) else oe
-    pid = od.get("original_id")
-    url = od.get("url") or (f"{SITE}/{pid}" if pid else "")
+    ref = post_ref(od, ("subsite", "author"))
+    pid, url, author = ref["id"], ref["url"], ref["author"]
     href, local = ctx.linker.href(url) if url else ("#", False)
     if pid and ctx.linker.local_post(pid):
         href, local = ctx.linker.local_post(pid), True
-    img = media_info(od.get("image"), ctx.resolver, ctx.owner) if od.get("image") else None
-    author = (od.get("subsite") or {}).get("name") or (od.get("author") or {}).get("name") or ""
+    img = media_info(od.get("image"), ctx.resolver) if od.get("image") else None
     na = ' <span class="muted">(недоступен)</span>' if od.get("isNotAvailable") else ""
-    ext = "" if local else ' target="_blank" rel="noopener"'
+    ext = "" if local else EXT_LINK
     pic = f'<span class="lc-img">{media_html(img, ctx, link=False)}</span>' if img else ""
     h = (f'<a class="b-embed" href="{E(href)}"{ext}>{pic}<span class="lc-body">'
          f'<span class="lc-title">{E(od.get("title") or "Пост")}{na}</span>'
@@ -305,7 +345,7 @@ def b_quiz(d: dict, ctx: Ctx) -> Result:
 
 
 def b_person(d: dict, ctx: Ctx) -> Result:
-    img = media_info(d.get("image"), ctx.resolver, ctx.owner) if d.get("image") else None
+    img = media_info(d.get("image"), ctx.resolver) if d.get("image") else None
     th, tmd, tt = rich(d.get("title"), ctx)
     dh, dmd, dt = rich(d.get("description"), ctx)
     h = (f'<div class="b-person pswp-gallery">{media_html(img, ctx) if img else ""}<div><div class="p-name">{th}</div>'
@@ -323,7 +363,7 @@ def b_button(d: dict, ctx: Ctx) -> Result:
         raise ValueError("кнопка без url/text")
     url = unwrap_url(str(url))
     href, local = ctx.linker.href(url)
-    ext = "" if local else ' target="_blank" rel="noopener"'
+    ext = "" if local else EXT_LINK
     t = convert_html(str(text)).text
     return (f'<p class="b-button"><a class="btn" href="{E(href)}"{ext}>{E(t)}</a></p>', f"[{t}]({url})",
             {"text": t, "url": url})
@@ -366,7 +406,7 @@ def b_generic(t: str) -> Callable[[dict, Ctx], Result]:
         walk(d)
         media = all_media(d, ctx)
         body = "".join(f"<p>{E(x)}</p>" for x in texts[:4])
-        links = "".join(f'<a href="{E(u)}" target="_blank" rel="noopener">{E(u)}</a><br>' for u in urls[:4])
+        links = "".join(f'<a href="{E(u)}"{EXT_LINK}>{E(u)}</a><br>' for u in urls[:4])
         thumbs = "".join(media_html(m, ctx, cls="thumb") for m in media[:6])
         h = (f'<div class="b-generic" data-type="{E(t)}"><div class="g-head">Встраиваемый блок «{E(t)}»</div>'
              f'{body}{f"<div class=g-links>{links}</div>" if links else ""}'

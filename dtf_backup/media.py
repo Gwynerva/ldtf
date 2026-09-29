@@ -21,7 +21,7 @@ import threading
 from pathlib import Path
 from typing import Any, Iterable
 
-from .api import media_url
+from .api import MEDIA, NOT_FOUND, media_url
 from .http import HttpClient, HttpError
 
 MIME_EXT = {
@@ -39,21 +39,54 @@ UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 
 AVATAR_SIZE = 72
 
+# What a sync downloads (archive setting "media"). Every reference is queued with its owner (media_use) either way;
+# the mode only filters the download, so switching back to "all" later fetches what was skipped.
+MEDIA_MODES = ("all", "posts", "off")
+MEDIA_MODE_TITLES = {"all": "Все", "posts": "Из постов", "off": "Не скачивать"}
+# "posts": the posts themselves plus what every page needs (profile, avatars, reaction and badge icons);
+# the media of comments - own ones (mc), under own posts (pc) and discussion context (tc) - stays on DTF
+POSTS_ONLY_OWNERS = ("profile", "avatar", "reaction", "badge", "post")
+COMMENT_OWNERS = ("mc", "pc", "tc")
 
-def avatar_key(avatar: Any) -> str | None:
-    """Small square avatar (~2 KB JPEG) for comment authors: {MEDIA}/<uuid>/-/scale_crop/72x72/."""
+
+def effective_media(media: str, scope: str) -> str:
+    """The media mode a sync applies: an archive of posts only has no comment media to skip, so "all" there means
+    the same as "posts" (it also keeps leftover comment references from being downloaded)."""
+    return "posts" if scope == "posts" and media == "all" else media
+
+
+def owner_kind(owner: str) -> str:
+    """'post:123' -> 'post', 'profile' -> 'profile'."""
+    return owner.split(":", 1)[0]
+
+
+def owner_sql(mode: str, col: str = "u.owner") -> str:
+    """SQL condition on a media_use owner column: may a sync in this mode download a file used this way?"""
+    if mode == "off":
+        return "0"
+    if mode != "posts":
+        return "1"
+    return "(" + " OR ".join(f"{col} = '{k}' OR {col} LIKE '{k}:%'" for k in POSTS_ONLY_OWNERS) + ")"
+
+
+def avatar_uuid(avatar: Any) -> str | None:
+    """uuid of a DTF avatar object ({"data": {"uuid"}} or {"uuid"}) or a bare uuid."""
     if isinstance(avatar, dict):
         avatar = (avatar.get("data") or {}).get("uuid") if isinstance(avatar.get("data"), dict) else avatar.get("uuid")
-    if not isinstance(avatar, str) or not UUID_RE.match(avatar):
-        return None
-    return f"https://leonardo.osnova.io/{avatar.lower()}/-/scale_crop/{AVATAR_SIZE}x{AVATAR_SIZE}/"
+    return avatar.lower() if isinstance(avatar, str) and UUID_RE.match(avatar) else None
+
+
+def avatar_key(avatar: Any, size: int = AVATAR_SIZE) -> str | None:
+    """Small square avatar (~2 KB JPEG) for comment authors: {MEDIA}/<uuid>/-/scale_crop/72x72/."""
+    u = avatar_uuid(avatar)
+    return f"{MEDIA}/{u}/-/scale_crop/{size}x{size}/" if u else None
 
 
 def raw_key(uuid: Any) -> str | None:
     """Original file without CDN conversion (animated WebP for reactions/badges): <uuid>/-/format/raw/."""
     if not isinstance(uuid, str) or not UUID_RE.match(uuid):
         return None
-    return f"https://leonardo.osnova.io/{uuid.lower()}/-/format/raw/"
+    return f"{MEDIA}/{uuid.lower()}/-/format/raw/"
 
 
 def signature(d: dict) -> str | None:
@@ -69,7 +102,7 @@ def media_key(value: Any) -> str | None:
     v = value.strip()
     if UUID_RE.match(v):
         return v.lower()
-    if v.startswith("https://leonardo.osnova.io/"):
+    if v.startswith(MEDIA + "/"):
         return v
     return None
 
@@ -214,27 +247,46 @@ class Downloader:
                     "mime": (r.headers.get("content-type") or "").split(";")[0],
                     "path": final.relative_to(self.root).as_posix()}
         except HttpError as e:
-            if e.status in (403, 404, 410, 451):
+            if e.status in NOT_FOUND:
                 return {"status": "missing", "error": f"HTTP {e.status}"}
             return {"status": "error", "error": str(e)[:300]}
         except OSError as e:
             return {"status": "error", "error": f"{type(e).__name__}: {e}"[:300]}
 
 
-def load_media_index(library: Path) -> dict[str, dict]:
-    """Shared catalog as key -> blob info ("path" is relative to the library root, e.g. media/ab/<sha>.jpg)."""
-    from .state import open_store, store_path
+def _read_index(library: Path, where: str = "", params: Iterable[Any] = ()) -> dict[str, dict]:
+    """key -> {"sha256", "path" (relative to the library root, e.g. media/ab/<sha>.jpg), "size", "mime"} for stored
+    files, {"missing": True} for files DTF no longer serves. Read-only: nothing is created before the first sync."""
+    from .state import connect_ro, store_path
+    p = store_path(library)
+    if not p.exists():
+        return {}
     idx: dict[str, dict] = {}
-    if not store_path(library).exists():
-        return idx
-    db = open_store(library)
-    for row in db.execute(
-            "SELECT r.key, r.status, b.sha256, b.path, b.size, b.mime FROM store.media_ref r "
-            "LEFT JOIN store.blob b ON b.sha256 = r.sha256 WHERE r.status IN ('done','missing')"):
-        if row["status"] == "done" and row["path"]:
-            idx[row["key"]] = {"sha256": row["sha256"], "path": "media/" + row["path"],
-                               "size": row["size"], "mime": row["mime"]}
-        elif row["status"] == "missing":
-            idx[row["key"]] = {"missing": True}
-    db.close()
+    db = connect_ro(p, timeout=30)
+    try:
+        for row in db.execute("SELECT r.key, r.status, b.sha256, b.path, b.size, b.mime FROM media_ref r "
+                              "LEFT JOIN blob b ON b.sha256 = r.sha256 WHERE r.status IN ('done','missing')" + where,
+                              list(params)):
+            if row["status"] == "done" and row["path"]:
+                idx[row["key"]] = {"sha256": row["sha256"], "path": "media/" + row["path"],
+                                   "size": row["size"], "mime": row["mime"]}
+            elif row["status"] == "missing":
+                idx[row["key"]] = {"missing": True}
+    finally:
+        db.close()
     return idx
+
+
+def load_media_index(library: Path) -> dict[str, dict]:
+    """The whole shared catalog (for rendering an archive)."""
+    return _read_index(library)
+
+
+def lookup(library: Path, keys: Iterable[str | None]) -> dict[str, dict]:
+    """Catalog entries of a few keys (avatars in the app bar) without loading the whole catalog."""
+    ks = sorted({k for k in keys if k})
+    out: dict[str, dict] = {}
+    for i in range(0, len(ks), 500):
+        part = ks[i:i + 500]
+        out.update(_read_index(library, f" AND r.key IN ({','.join('?' * len(part))})", part))
+    return out

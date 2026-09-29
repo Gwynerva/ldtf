@@ -47,17 +47,20 @@ def descendants(cid: int, children: dict[int, list[int]]) -> list[int]:
     return out
 
 
-def prune_context(items: list[dict], my_ids: Iterable[int]) -> tuple[list[dict], list[int]]:
-    """Keep, for every comment in my_ids: its ancestor chain, itself and its whole reply subtree.
-    Returns (kept items in original order, my ids not present in items)."""
-    by_id, children = index_tree(items)
+def keep_ids(ids: Iterable[int], by_id: dict, children: dict) -> set[int]:
+    """The context of comments: for each one present, its ancestor chain, itself and its whole reply subtree."""
     keep: set[int] = set()
-    missing: list[int] = []
-    for mid in my_ids:
-        if mid not in by_id:
-            missing.append(mid)
-            continue
-        keep.add(mid)
-        keep.update(a for a in ancestors(mid, by_id) if a in by_id)
-        keep.update(descendants(mid, children))
-    return [c for c in items if c["id"] in keep], missing
+    for i in ids:
+        if i in by_id:
+            keep.add(i)
+            keep.update(a for a in ancestors(i, by_id) if a in by_id)
+            keep.update(descendants(i, children))
+    return keep
+
+
+def prune_context(items: list[dict], my_ids: Iterable[int]) -> tuple[list[dict], list[int]]:
+    """Keep only the context of my comments (keep_ids). Returns (kept items in original order, my ids not in items)."""
+    by_id, children = index_tree(items)
+    my_ids = list(my_ids)
+    keep = keep_ids(my_ids, by_id, children)
+    return [c for c in items if c["id"] in keep], [m for m in my_ids if m not in by_id]

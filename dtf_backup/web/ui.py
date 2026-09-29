@@ -10,11 +10,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..api import comment_url
-from ..blocks import Ctx, Report, _link_card, _video_parts, json_spoiler, media_html, media_md, media_norm
+from ..blocks import (STUB_ICONS, Ctx, Report, _link_card, _video_parts, b_osnova_embed, json_spoiler, media_html, media_md,
+                      media_norm, media_stub)
+from ..guard import state_title, title
 from ..media import avatar_key
-from ..normalize import Linker, MediaResolver, comment_text, media_info
+from ..normalize import EXT_LINK, Linker, MediaResolver, comment_text, media_info
 from ..reactions import Reactions
-from ..util import ts_human
+from ..util import COMMENTS, POSTS, count_label, num, plural, ts_human
 from .icons import icon
 
 E = html.escape
@@ -39,17 +41,6 @@ def month_title(ym: str) -> str:
     return f"{MONTHS[int(m) - 1].capitalize()} {y}"
 
 
-def plural(n: int, one: str, few: str, many: str) -> str:
-    n = abs(n) % 100
-    if 10 < n < 20:
-        return many
-    return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
-
-
-def num(n: int | float) -> str:
-    return f"{int(n):,}".replace(",", "\u00a0")  # no-break space: "89 675" never splits across lines
-
-
 class Links:
     """URL scheme of the app for one archive."""
 
@@ -63,10 +54,11 @@ class Links:
     def comments(self) -> str: return self.base + "/comments"
     def month(self, ym: str, page: int = 1) -> str: return f"{self.base}/c/{ym}" + (f"?page={page}" if page > 1 else "")
     def go(self, cid: int) -> str: return f"{self.base}/go/c/{int(cid)}"
-    def search(self, q: str = "") -> str: return self.base + "/search" + (f"?q={urllib.parse.quote(q)}" if q else "")
+    def search(self) -> str: return self.base + "/search"
     def reactions(self) -> str: return self.base + "/reactions"
     def sync(self) -> str: return self.base + "/sync"
     def settings(self) -> str: return self.base + "/settings"
+    def action(self, name: str) -> str: return f"{self.base}/{name}"   # POST: sync/start, sync/stop, render, guard, delete
 
     @staticmethod
     def media(path: str) -> str: return "/" + path.lstrip("/")
@@ -75,26 +67,36 @@ class Links:
     def asset(name: str) -> str: return f"/assets/{name}?v={AV}"
 
 
-def avatar(src: str | None, size: int | None = None, cls: str = "", lazy: bool = True) -> str:
-    """Round avatar; without `size` the surrounding CSS decides (--s)."""
-    st = f' style="--s:{size}px"' if size else ""
+def avatar(src: str | None, cls: str = "", lazy: bool = True) -> str:
+    """Round avatar (the surrounding CSS sets the size, --s); the person icon without a picture - also when a picture
+    from DTF (not in the archive) fails to load (app.js)."""
     c = f" {cls}" if cls else ""
     if src:
-        return f'<img class="av{c}" src="{E(src)}" alt=""{" loading=lazy" if lazy else ""}{st}>'
-    return f'<span class="av0{c}"{st}>{icon("person")}</span>'
+        rem = ' data-remote="avatar"' if src.startswith("http") else ""
+        return f'<img class="av{c}" src="{E(src)}" alt=""{" loading=lazy" if lazy else ""}{rem}>'
+    return f'<span class="av0{c}">{icon("person")}</span>'
 
 
 def avatar_src(resolver: MediaResolver, avatar: Any) -> str | None:
+    """The archived small avatar, else DTF's; None when there is none or DTF reported it deleted."""
     key = avatar_key(avatar)
-    if not key:
+    if not key or resolver.gone(key):
         return None
     loc = resolver.local(key)
     return Links.media(loc["path"]) if loc else key
 
 
-def counts_line(posts: int, comments: int) -> str:
-    return (f'{num(posts)} {plural(posts, "пост", "поста", "постов")} · '
-            f'{num(comments)} {plural(comments, "комментарий", "комментария", "комментариев")}')
+def archive_link(a: dict) -> tuple[str, str]:
+    """(href, line under the name) of an archive entry: a built archive opens, one still building shows its sync."""
+    L = Links(a["nick"])
+    if a.get("built"):
+        return L.home(), counts_line(a.get("posts") or 0, a.get("comments") or 0, a.get("comments_on", True))
+    return L.sync(), "архив ещё собирается"
+
+
+def counts_line(posts: int, comments: int, with_comments: bool = True) -> str:
+    """"12 постов · 340 комментариев"; an archive of posts only: "12 постов · только посты"."""
+    return f"{count_label(posts, *POSTS)} · " + (count_label(comments, *COMMENTS) if with_comments else "только посты")
 
 
 # ---------------------------------------------------------------------- components (Material 3 markup)
@@ -124,11 +126,12 @@ def menu(ic: str, title: str, items: str, right: bool = True, cls: str = "") -> 
             f'<div class="menu-pop" role="menu">{items}</div></details>')
 
 
-def menu_item(label: str, ic: str, href: str | None = None, on: bool = False) -> str:
+def menu_item(label: str, ic: str, href: str | None = None, on: bool = False, title: str = "") -> str:
     c = "menu-item" + (" on" if on else "")
+    t = f' title="{E(title)}"' if title else ""
     if href is None:
-        return f'<button class="{c}" type="submit" role="menuitem">{icon(ic)}{E(label)}</button>'
-    return f'<a class="{c}" href="{E(href)}" role="menuitem">{icon(ic)}{E(label)}</a>'
+        return f'<button class="{c}" type="submit" role="menuitem"{t}>{icon(ic)}{E(label)}</button>'
+    return f'<a class="{c}" href="{E(href)}" role="menuitem"{t}>{icon(ic)}{E(label)}</a>'
 
 
 def page_head(title: str, sub: str = "", actions: str = "", n: int | None = None, raw_title: bool = False) -> str:
@@ -200,12 +203,27 @@ def banner(kind: str, html_: str, ic: str | None = None) -> str:
 
 def guard_banner(acc: dict) -> str:
     """Every page of an archive whose sync the guard stopped says so and links to the decision."""
-    from ..guard import KIND_TITLES
     g = acc.get("guard") or {}
-    what = KIND_TITLES.get(g.get("kind"), "что-то пошло не так")
+    what = title(g.get("kind"))
     return (f'<div class="banner err guard-banner" role="alert">{icon("gpp_maybe", fill=True)}'
             f'<div class="banner-t"><b>Синхронизация остановлена:</b> {E(what)}. Архив не изменён.</div>'
             f'<a class="btn text" href="{E(Links(acc["nick"]).sync())}">Разобраться</a></div>')
+
+
+def fold(summary: str, body: str, cls: str = "fold", attrs: str = "") -> str:
+    """A disclosure with a chevron (style.css draws them all alike); `summary` and `body` are HTML."""
+    return f'<details class="{cls}"{attrs}><summary>{icon("keyboard_arrow_down")}{summary}</summary>{body}</details>'
+
+
+def badge(text: str, ic: str | None = None, cls: str = "", title: str = "") -> str:
+    """A small label next to a title; `text` is escaped."""
+    c = f" {cls}" if cls else ""
+    t = f' title="{E(title)}"' if title else ""
+    return f'<span class="badge{c}"{t}>{icon(ic) if ic else ""}{E(text)}</span>'
+
+
+def hidden_input(name: str, value: Any) -> str:
+    return f'<input type="hidden" name="{E(name)}" value="{E(str(value))}">'
 
 
 def snackbar(text: str) -> str:
@@ -233,8 +251,16 @@ RING = ('<svg class="ring" viewBox="0 0 24 24" aria-hidden="true"><circle class=
 THEME_JS = ('(function(){var d=document.documentElement,t=null;try{t=localStorage.getItem("dtf-theme")}catch(e){}'
             'var m=window.matchMedia&&matchMedia("(prefers-color-scheme: dark)");'
             'd.setAttribute("data-theme",t||(m&&m.matches?"dark":"light"));'
+            'var c=document.querySelector("meta[name=theme-color]");if(c&&d.getAttribute("data-theme")=="dark")c.content="#111318";'
             'if(!t&&m&&m.addEventListener)m.addEventListener("change",function(e){try{if(localStorage.getItem("dtf-theme"))return}'
             'catch(x){}d.setAttribute("data-theme",e.matches?"dark":"light")})})();')
+# before any picture loads: note the files from DTF (not in the archive) that fail, app.js puts placeholders there
+MEDIA_JS = ('document.addEventListener("error",function(e){var t=e.target;if(t&&t.hasAttribute&&t.hasAttribute("data-remote")'
+            '&&!t.hasAttribute("data-failed"))t.setAttribute("data-failed","net")},true);')
+# what app.js builds pages from: icons by name and the placeholder of a file that failed to load
+PAGE_TEMPLATES = ('<template id="icons">' + "".join(f'<i data-n="{n}">{icon(n)}</i>' for n in ("arrow_back", "person"))
+                  + "".join(f'<i data-n="stub-{k}">{icon(n)}</i>' for k, n in STUB_ICONS.items()) + "</template>"
+                  f'<template id="mstub">{media_stub("image")}</template>')
 NAV = [("home", "index", "Главная", "home"), ("posts", "posts", "Посты", "article"),
        ("comments", "comments", "Комментарии", "forum"), ("search", "search", "Поиск", "search")]
 MANAGE = {"sync", "settings", "reactions"}
@@ -255,12 +281,10 @@ class Shell:
             who, label = avatar(None), "Архивы"
         items = []
         for a in accounts:
-            L = Links(a["nick"])
             on = bool(current and a["nick"] == current["nick"])
-            sub = counts_line(a.get("posts") or 0, a.get("comments") or 0) if a.get("built") else "архив ещё собирается"
+            href, sub = archive_link(a)
             items.append(
-                f'<a class="acct-item{" on" if on else ""}" data-nick="{E(a["nick"])}" '
-                f'href="{E(L.home() if a.get("built") else L.sync())}">'
+                f'<a class="acct-item{" on" if on else ""}" data-nick="{E(a["nick"])}" href="{E(href)}">'
                 f'{avatar(a.get("avatar"))}<span class="acct-t"><b>{E(a["name"])}</b><small>@{E(a["nick"])}</small>'
                 f'<small>{sub}</small></span><span class="acct-sync" title="Идёт синхронизация" hidden>{icon("sync")}</span>'
                 f'{icon("check", cls="acct-on") if on else ""}</a>')
@@ -268,17 +292,17 @@ class Shell:
             items.append('<hr class="menu-div">')
         items.append(menu_item("Добавить пользователя", "person_add", "/add", on=active == "add"))
         items.append(menu_item("Все архивы", "inventory_2", "/archives", on=active == "archives"))
-        items.append(menu_item("Настройки приложения", "settings", "/app", on=active == "app"))
-        items.append(menu_item("Диагностика API", "network_check", "/diagnostics", on=active == "diagnostics"))
+        items.append(menu_item("Настройки приложения", "settings", "/app", on=active in ("app", "diagnostics")))
         acct = (f'<details class="acct"><summary title="Сменить архив" aria-label="Сменить архив">{who}'
                 f'<span class="acct-name">{label}</span>{icon("unfold_more")}</summary>'
                 f'<div class="menu-pop acct-menu" role="menu">{"".join(items)}</div></details>')
         nav = manage = ""
         if links:
+            dests = [d for d in NAV if d[1] != "comments" or (current or {}).get("comments_on", True)]
             nav = '<nav class="dest" aria-label="Разделы архива">' + "".join(
                 f'<a class="dest-i{" on" if key == active else ""}" href="{E(getattr(links, route)())}"'
                 f'{" aria-current=page" if key == active else ""}><span class="dest-ic">{icon(ic, 24, fill=key == active)}</span>'
-                f'<span class="dest-t">{t}</span></a>' for route, key, t, ic in NAV) + "</nav>"
+                f'<span class="dest-t">{t}</span></a>' for route, key, t, ic in dests) + "</nav>"
             manage = icon_btn("tune", "Управление архивом", links.sync(), cls="on" if active in MANAGE else "")
         theme = (f'<button class="icon-btn theme-btn" type="button" title="Светлая или тёмная тема" aria-label="Сменить тему">'
                  f'{icon("dark_mode", cls="t-dark")}{icon("light_mode", cls="t-light")}</button>')
@@ -286,7 +310,8 @@ class Shell:
                 f'<a class="job-ind" href="/jobs" hidden>{RING}<span class="job-pct"></span></a>{manage}{theme}</div></header>')
 
     def page(self, title: str, body: str, *, current: dict | None, accounts: list[dict], active: str = "",
-             wide: bool = False, extra: str = "") -> str:
+             wide: bool = False, extra: str = "", bare: bool = False) -> str:
+        """`bare`: without the app bar (the page after LDTF was stopped: its links would lead nowhere)."""
         name = current["name"] if current else ""
         if current and current.get("guard") and active != "sync":   # the sync tab shows the full guard card
             body = guard_banner(current) + body
@@ -297,20 +322,24 @@ class Shell:
                 f'<title>{full} · LDTF</title><link rel="icon" href="{Links.asset("brand/ldtf.svg")}" type="image/svg+xml">'
                 f'<link rel="icon" href="{Links.asset("brand/ldtf-32.png")}" sizes="32x32" type="image/png">'
                 f'<link rel="apple-touch-icon" href="{Links.asset("brand/ldtf-180.png")}">'
-                f'<script>{THEME_JS}</script>'
+                f'<script>{THEME_JS}{MEDIA_JS}</script>'
                 f'<link rel="stylesheet" href="{Links.asset("vendor/photoswipe/photoswipe.css")}">'
                 f'<link rel="stylesheet" href="{Links.asset("style.css")}"></head>'
-                f'<body>{self.appbar(current, accounts, active)}'
+                f'<body>{"" if bare else self.appbar(current, accounts, active)}'
                 f'<main class="page page--{"wide" if wide else "read"}">{body}</main>'
-                f'<template id="icons"><i data-n="arrow_back">{icon("arrow_back")}</i></template>'
+                f'{PAGE_TEMPLATES}'
                 f'<script src="{Links.asset("vendor/photoswipe/photoswipe.umd.min.js")}"></script>'
                 f'<script src="{Links.asset("vendor/photoswipe/photoswipe-lightbox.umd.min.js")}"></script>'
                 f'<script src="{Links.asset("app.js")}"></script>{extra}</body></html>\n')
 
-    def form(self, action: str, inner: str, cls: str = "", confirm: str | None = None) -> str:
+    def form(self, action: str, inner: str, cls: str = "", confirm: str | None = None, hidden: bool = False,
+             fid: str = "") -> str:
+        """A POST form with the CSRF token; `confirm`: ask before sending; `hidden`: shown later by app.js;
+        `fid`: the form's id (buttons elsewhere on the page submit it with form="...")."""
         c = f' data-confirm="{E(confirm)}"' if confirm else ""
         k = f' class="{cls}"' if cls else ""
-        return (f'<form method="post" action="{E(action)}"{k}{c}>'
+        i = f' id="{E(fid)}"' if fid else ""
+        return (f'<form method="post" action="{E(action)}"{i}{k}{c}{" hidden" if hidden else ""}>'
                 f'<input type="hidden" name="_csrf" value="{E(self.csrf)}">{inner}</form>')
 
 
@@ -364,7 +393,7 @@ class CommentView:
             t = m.get("type") if isinstance(m, dict) else None
             try:
                 if t in ("image", "movie"):
-                    mi = media_info(m, self.resolver, ctx.owner)
+                    mi = media_info(m, self.resolver)
                     if not mi:
                         raise ValueError("нет uuid")
                     if t == "movie":
@@ -377,8 +406,8 @@ class CommentView:
                     hs.append(h)
                     mds.append(md)
                     norms.append({"type": t, **n})
-                elif t == "link":
-                    h, md, n = _link_card(m.get("data") or {}, ctx)
+                elif t in ("link", "osnovaEmbed"):   # a link card / a DTF post attached to the comment
+                    h, md, n = _link_card(m.get("data") or {}, ctx) if t == "link" else b_osnova_embed({t: m}, ctx)
                     hs.append(h)
                     mds.append(md)
                     norms.append({"type": t, **n})
@@ -399,7 +428,7 @@ class CommentView:
         mine = c.get("author") == self.uid
         name = E(self.author_name(c.get("author")))
         pid = post_id or (c.get("entry") or {}).get("id")
-        date_link = (f'<a class="cd" href="{E(comment_url(pid, c["id"]))}" target="_blank" '
+        date_link = (f'<a class="cd" href="{E(comment_url(pid, c["id"]))}"{EXT_LINK} '
                      f'title="Открыть на DTF">{ts_human(c.get("date"))}</a>') if pid else ts_human(c.get("date"))
         badges = []
         if c.get("rx") and self.rx:
@@ -410,7 +439,6 @@ class CommentView:
         if c.get("isEdited"):
             badges.append(f'<span class="c-ed" title="Отредактирован">{icon("edit")}</span>')
         if c.get("site"):
-            from ..guard import state_title
             badges.append(f'<span class="c-site" title="На DTF комментария больше нет; в архиве сохранён прежний текст">'
                           f'{icon("history")}{E(state_title(c["site"]))}</span>')
         tog = ""
@@ -464,7 +492,6 @@ class CommentView:
         mds = self.media_parts(c)[1] if c.get("media") else []
         extra = (" " + " ".join(mds)) if mds else ""
         if c.get("site"):
-            from ..guard import state_title
             extra += f" *({state_title(c['site'])})*"
         return f"{who} ({ts_human(c.get('date'))}): {text}{extra}".replace("\n", " ")
 

@@ -2,24 +2,28 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import html
 import json
 import re
 import sqlite3
+import urllib.parse as up
 from typing import Any
 
-from ..api import SITE, comment_url
-from ..blocks import Ctx, Report, render_blocks
+from ..api import SITE, comment_url, post_url
+from ..blocks import Ctx, Report, media_stub, remote_attrs, render_blocks, src_attr
 from ..context import ancestors, index_tree
 from ..guard import state_title
-from ..normalize import MediaResolver
-from ..reactions import Reactions, load_config
+from ..normalize import EXT_LINK, MediaResolver, comment_text, media_info, media_src, post_ref
+from ..reactions import Reactions
+from ..scope import comments_kept
+from ..search.engine import has_index, search
 from ..state import Archive, unpack
-from ..util import human_bytes, read_json_gz, ts_date, ts_human
+from ..util import COMMENTS, MSK, POSTS, count_label, human_bytes, num, plural, ts_date, ts_human
 from ..viewdb import group_view, open_view, view_meta
 from .icons import icon
-from .ui import (MONTHS_SHORT, CommentView, Links, avatar, avatar_src, banner, btn, empty_state, icon_btn,
-                 manage_tabs, mi, month_title, num, page_head, pager, pagination, plural, sec_head, stat)
+from .ui import (MONTHS_SHORT, CommentView, Links, badge, banner, btn, empty_state, fold, icon_btn,
+                 manage_tabs, mi, month_title, page_head, pager, pagination, sec_head, stat)
 
 E = html.escape
 
@@ -39,12 +43,14 @@ class ArchiveView:
         self.prof: dict = meta["profile"]
         self.uid: int = meta["uid"]
         self.local_posts = {r[0] for r in db.execute("SELECT id FROM posts")}
+        counts = meta.get("counts") or {}
+        # comment pages exist while the archive keeps comments (or still has some): not for an archive of posts only
+        self.comments_on = comments_kept(arch.settings()) or bool(counts.get("my_comments") or counts.get("post_comments"))
         self.users = {r["id"]: dict(r) for r in db.execute("SELECT id, name, nickname, uri, avatar FROM users")}
         db.close()
         self.report = Report()
         self.resolver = MediaResolver.for_library(arch.library)
-        assets = read_json_gz(arch.raw_assets()) if arch.raw_assets().exists() else {}
-        self.rx = Reactions(assets, self.resolver, self.report, load_config(arch.root))
+        self.rx = Reactions.for_archive(arch, self.resolver, self.report)
         self.cv = CommentView(self.resolver, self.local_posts, self.users, self.uid, self.report, self.links, self.rx)
 
     def db(self) -> sqlite3.Connection:
@@ -67,15 +73,16 @@ def post_card(v: ArchiveView, row: sqlite3.Row) -> str:
     cov = json.loads(row["cover"]) if row["cover"] else None
     img = ""
     if cov:
-        src = E("/" + cov["local"] if cov.get("local") else cov["remote"])
-        img = (f'<video src="{src}" muted loop playsinline preload="metadata" data-autoplay></video>'
-               if cov["kind"] == "video" else f'<img loading="lazy" src="{src}" alt="">')
+        a = src_attr(cov, E(media_src(cov, "/"))) + remote_attrs(cov)
+        stub = media_stub(cov["kind"], "gone", action=False) if cov.get("gone") and not cov.get("local") else ""
+        img = (f'<video{a} muted loop playsinline preload="metadata" data-autoplay></video>'
+               if cov["kind"] == "video" else f'<img loading="lazy"{a} alt="">') + stub
     pairs = [tuple(x) for x in json.loads(row["rx"] or "[]")]
     pos, _ = v.rx.split(pairs)
     rep = f'<span title="Репост">{icon("repeat")}</span>' if row["repost"] else ""
     site = row["site"] if "site" in row.keys() else None
     if site:
-        rep += f'<span class="badge site pc-site">{icon("history")}{E(state_title(site))}</span>'
+        rep += badge(state_title(site), "history", "site pc-site")
     lead = f'<div class="pc-l">{E(row["lead"])}</div>' if row["lead"] else ""
     return (f'<a class="pcard card" href="{E(v.links.post(row["id"]))}" data-date="{row["date"]}" '
             f'data-comments="{row["comments"]}" data-reactions="{pos}">'
@@ -89,7 +96,7 @@ def _entry_link(v: ArchiveView, eid: int | None, cid: int | None = None) -> tupl
     if eid and eid in v.local_posts:
         return v.links.post(eid) + (f"#c{cid}" if cid else ""), ""
     if eid:
-        return (comment_url(eid, cid) if cid else f"{SITE}/{eid}"), ' target="_blank" rel="noopener"'
+        return (comment_url(eid, cid) if cid else post_url(eid)), EXT_LINK
     return "#", ""
 
 
@@ -106,58 +113,51 @@ def _entry_head(v: ArchiveView, eid: int | None, title: str, sub: str | None, ow
 def page_home(v: ArchiveView) -> tuple[str, str]:
     db = v.db()
     prof = v.prof
-    from ..normalize import media_info
     cov = media_info(prof["cover"], v.resolver) if prof.get("cover") else None
-    cov_style = ""
-    if cov and cov["kind"] == "image":
-        src = "/" + cov["local"] if cov.get("local") else cov["remote"]
-        cov_style = f' style="background-image:url(&quot;{E(src)}&quot;)"'
+    cover = ""   # over the cover's tint: if the picture fails to load, the tint stays
+    if cov and cov["kind"] == "image" and not cov["gone"]:
+        cover = f'<img class="cover-img" src="{E(media_src(cov, "/"))}" alt=""{remote_attrs(cov)}>'
     av = '<span class="ava av0">' + icon("person") + "</span>"
     m = media_info(prof["avatar"], v.resolver) if prof.get("avatar") else None
-    if m:
-        src = E("/" + m["local"] if m.get("local") else m["remote"])
-        av = (f'<video class="ava" src="{src}" muted loop autoplay playsinline></video>' if m["kind"] == "video"
-              else f'<img class="ava" src="{src}" alt="">')
+    if m and not m["gone"]:
+        a = f' src="{E(media_src(m, "/"))}"' + remote_attrs(m)
+        av = (f'<video class="ava"{a} muted loop autoplay playsinline></video>' if m["kind"] == "video"
+              else f'<img class="ava"{a} alt="">')
     counts = v.meta["counts"]
     years: dict[str, int] = {}
     for r in db.execute("SELECT ym, comments FROM months ORDER BY ym DESC"):
         years[r["ym"][:4]] = years.get(r["ym"][:4], 0) + r["comments"]
     recent = "".join(post_card(v, r) for r in db.execute("SELECT * FROM posts ORDER BY date DESC LIMIT 9"))
     db.close()
-    media_n, media_size, _ = _state_info(v)
+    media_n, media_size = _media_usage(v)
     name = prof.get("name") or v.nick
-    ext = icon_btn("open_in_new", "Профиль на DTF", prof.get("url") or SITE, attrs=' target="_blank" rel="noopener"')
+    ext = icon_btn("open_in_new", "Профиль на DTF", prof.get("url") or SITE, attrs=EXT_LINK)
     desc = (prof.get("description") or "").strip()
-    stats = (stat(num(counts["posts"]), plural(counts["posts"], "пост", "поста", "постов"), v.links.posts()) +
-             stat(num(counts["my_comments"]), plural(counts["my_comments"], "комментарий", "комментария", "комментариев"),
-                  v.links.comments()) +
+    stats = (stat(num(counts["posts"]), plural(counts["posts"], *POSTS), v.links.posts()) +
+             (stat(num(counts["my_comments"]), plural(counts["my_comments"], *COMMENTS), v.links.comments())
+              if v.comments_on else "") +
              (stat(num(media_n), f"медиа · {human_bytes(media_size)}") if media_n else ""))
     more = lambda label, href: f'<a class="btn text" href="{E(href)}">{E(label)}{icon("chevron_right")}</a>'  # noqa: E731
     yl = "".join(f'<a class="chip" href="{E(v.links.comments())}#y{y}">{y}<span class="n">{num(n)}</span></a>'
                  for y, n in years.items())
-    body = (f'<section class="profile card"><div class="cover"{cov_style}></div>'
+    body = (f'<section class="profile card"><div class="cover">{cover}</div>'
             f'<div class="pbody">{av}<div class="pinfo"><h1 class="pname">{E(name)}</h1>'
             f'<div class="psub">@{E(v.nick)} · на DTF с {ts_date(prof.get("created"))}</div></div>{ext}</div>'
             f'{f"<p class=pdesc>{E(desc)}</p>" if desc else ""}<div class="stats pstats">{stats}</div></section>'
             f'{sec_head("Последние посты", action=more("Все посты", v.links.posts()))}<div class="plist">{recent}</div>'
             + (f'{sec_head("Комментарии по годам", action=more("Календарь", v.links.comments()))}'
-               f'<div class="chips">{yl}</div>' if yl else ""))
+               f'<div class="chips">{yl}</div>' if yl and v.comments_on else ""))
     return name, body
 
 
-def _state_info(v: ArchiveView) -> tuple[int, int, dict | None]:
-    """Media stats and last sync from state.sqlite, via a short-lived connection (the server must not keep
-    archive files open: Windows would refuse to delete an archive)."""
+def _media_usage(v: ArchiveView) -> tuple[int, int]:
+    """Media files of the archive, via a short-lived connection (the server must not keep archive files open:
+    Windows would refuse to delete an archive)."""
     if not v.arch.exists():
-        return 0, 0, None
+        return 0, 0
     a = Archive(v.arch.root, v.arch.library)
     try:
-        r = a.db.execute("SELECT COUNT(*), COALESCE(SUM(b.size),0) FROM store.blob b WHERE b.sha256 IN "
-                         "(SELECT r.sha256 FROM store.media_ref r WHERE r.key IN (SELECT key FROM main.media_use))"
-                         ).fetchone()
-        return r[0], r[1], a.get_meta("last_sync")
-    except sqlite3.Error:
-        return 0, 0, None
+        return a.media_usage()
     finally:
         a.close()
 
@@ -183,16 +183,14 @@ def page_posts(v: ArchiveView) -> tuple[str, str]:
 
 def _repost_html(v: ArchiveView, p: dict, ctx: Ctx) -> str:
     rd = (p.get("repostData") or {}).get("data")
-    if not isinstance(rd, dict):
+    r = post_ref(rd)
+    if r is None:
         return ""
-    oid = rd.get("original_id")
-    url = rd.get("url") or (f"{SITE}/{oid}" if oid else "")
-    href, ext = _entry_link(v, oid) if oid else (url, ' target="_blank" rel="noopener"')
-    author = (rd.get("author") or {}).get("name") or (rd.get("subsite") or {}).get("name") or ""
+    href, ext = _entry_link(v, r["id"]) if r["id"] else (r["url"], EXT_LINK)
     bh, _, _ = render_blocks(rd.get("blocks") or [], ctx)
-    return (f'<div class="repost"><div class="meta">{mi("repeat", "Репост")}<span>{E(author)}</span>'
-            f'<span>{ts_human(rd.get("date"))}</span></div>'
-            f'<h2><a href="{E(href)}"{ext}>{E(rd.get("title") or "Пост")}</a></h2>{bh}</div>')
+    return (f'<div class="repost"><div class="meta">{mi("repeat", "Репост")}<span>{E(r["author"])}</span>'
+            f'<span>{ts_human(r["date"])}</span></div>'
+            f'<h2><a href="{E(href)}"{ext}>{E(r["title"] or "Пост")}</a></h2>{bh}</div>')
 
 
 def page_post(v: ArchiveView, pid: int) -> tuple[str, str] | None:
@@ -222,15 +220,15 @@ def page_post(v: ArchiveView, pid: int) -> tuple[str, str] | None:
     if dm and dm - (p.get("date") or 0) > 600:
         meta.append(mi("edit", "изменён", f"Изменён {ts_human(dm)}"))
     if row["source"] == "timeline":
-        meta.append(f'<span class="badge" title="Страница поста была недоступна">{icon("info")}сохранён из ленты</span>')
+        meta.append(badge("сохранён из ленты", "info", title="Страница поста была недоступна"))
     if row["unlisted"]:
-        meta.append(f'<span class="badge">{icon("visibility_off")}скрыт из профиля</span>')
+        meta.append(badge("скрыт из профиля", "visibility_off"))
     site = (p.get("_site") or {}).get("state")
     if site:
-        meta.append(f'<span class="badge site" title="На DTF поста в прежнем виде больше нет; в архиве сохранена версия '
-                    f'от {E(ts_human(p.get("dateModified") or p.get("date")))}">{icon("history")}{E(state_title(site))}</span>')
-    meta.append('<span class="sp"></span>' + icon_btn("open_in_new", "Открыть на DTF", p.get("url") or f"{SITE}/{pid}",
-                                                     attrs=' target="_blank" rel="noopener"'))
+        meta.append(badge(state_title(site), "history", "site", "На DTF поста в прежнем виде больше нет; в архиве сохранена "
+                          f"версия от {ts_human(p.get('dateModified') or p.get('date'))}"))
+    meta.append('<span class="sp"></span>' + icon_btn("open_in_new", "Открыть на DTF", p.get("url") or post_url(pid),
+                                                     attrs=EXT_LINK))
     foot = []
     if counters.get("favorites"):
         foot.append(f'<span class="cnt" title="В закладках">{icon("bookmark")}{num(counters["favorites"])}</span>')
@@ -239,11 +237,17 @@ def page_post(v: ArchiveView, pid: int) -> tuple[str, str] | None:
     foot.append(v.rx.score_html(pairs) + v.rx.html(pairs, "/", f"post {pid}", limit=60))
     foot_h = "".join(foot)
     title = p.get("title") or ""
+    if items or v.comments_on:
+        comments = (f'<section class="comments card" id="comments">{sec_head("Комментарии", n=len(items))}'
+                    f'{comments_h or "<p class=muted>Комментариев нет.</p>"}</section>')
+    else:   # an archive of posts only: the discussion stays on DTF
+        n = counters.get("comments") or 0
+        link = (f' <a href="{E((p.get("url") or post_url(pid)) + "#comments")}"{EXT_LINK}>'
+                f'{count_label(n, "комментарий", "комментария", "комментариев")} на DTF</a>' if n else "")
+        comments = f'<p class="muted small no-comments">{icon("forum")}<span>Комментарии в этом архиве не сохраняются.{link}</span></p>'
     body = (f'<article class="post card" id="p{pid}"><div class="post-meta">{"".join(meta)}</div>'
             f'<h1>{E(title) or "<span class=muted>Без заголовка</span>"}</h1>{repost_h}{blocks_h}'
-            f'{f"<div class=post-foot>{foot_h}</div>" if foot_h.strip() else ""}</article>{nav}'
-            f'<section class="comments card" id="comments">{sec_head("Комментарии", n=len(items))}'
-            f'{comments_h or "<p class=muted>Комментариев нет.</p>"}</section>')
+            f'{f"<div class=post-foot>{foot_h}</div>" if foot_h.strip() else ""}</article>{nav}{comments}')
     return title or f"Пост {pid}", body
 
 
@@ -270,7 +274,7 @@ def page_calendar(v: ArchiveView) -> tuple[str, str]:
                 cells.append(f'<span><span class="m">{label}</span></span>')
         total = sum(months.values())
         out.append(f'<section class="cal-year card" id="y{y}"><h2>{y}<span class="n">{num(total)} '
-                   f'{plural(total, "комментарий", "комментария", "комментариев")}</span></h2>'
+                   f'{plural(total, *COMMENTS)}</span></h2>'
                    f'<div class="cal-months">{"".join(cells)}</div></section>')
     total = sum(r["comments"] for r in rows)
     return "Комментарии", page_head("Комментарии", n=total) + "".join(out)
@@ -294,11 +298,11 @@ def page_month(v: ArchiveView, ym: str, page: int) -> tuple[str, str] | None:
 
     def nav_btn(target: str | None, ic: str) -> str:
         if not target:
-            return f'<span class="icon-btn" aria-hidden="true" style="opacity:.35">{icon(ic)}</span>'
+            return f'<span class="icon-btn dis" aria-hidden="true">{icon(ic)}</span>'
         return icon_btn(ic, month_title(target), v.links.month(target))
     n, ng = mrow["comments"], mrow["groups"]
-    sub = (f'{num(n)} {plural(n, "комментарий", "комментария", "комментариев")} · '
-           f'{num(ng)} {plural(ng, "обсуждение", "обсуждения", "обсуждений")}')
+    sub = (f'{count_label(n, *COMMENTS)} · '
+           f'{count_label(ng, "обсуждение", "обсуждения", "обсуждений")}')
     actions = (nav_btn(older, "chevron_left") + nav_btn(newer, "chevron_right") +
                btn("Все месяцы", "text", "calendar_month", href=v.links.comments()))
     ck = icon("check", cls="ck")
@@ -320,7 +324,7 @@ def _group_html(v: ArchiveView, db: sqlite3.Connection, g: sqlite3.Row, cache: d
     erow = db.execute("SELECT title, subsite_name, own FROM entries WHERE id=?", (eid,)).fetchone() if eid else None
     title = (erow["title"] if erow else None) or ("Пост" if eid else "Пост недоступен")
     own = bool(g["own"])
-    cnt = (f'<span class="badge mc-n">{len(mine)} {plural(len(mine), "комментарий", "комментария", "комментариев")}</span>'
+    cnt = (badge(count_label(len(mine), *COMMENTS), cls="mc-n")
            if len(mine) > 1 else "")
     parts = [f'<article class="mc card" data-r="{g["has_replies"]}" data-m="{g["has_media"]}" data-o="{int(own)}">'
              + _entry_head(v, eid, title, erow["subsite_name"] if erow else None, own, cnt)]
@@ -335,14 +339,13 @@ def _group_html(v: ArchiveView, db: sqlite3.Connection, g: sqlite3.Row, cache: d
             parts.append(f'<div class="c-node">{cv.one(c, eid, True)}</div>')
             if (c["level"] > 0 or c["replyCount"] > 0) and eid:
                 parts.append(f'<div class="ctx-note">{icon("info")}Контекст ветки не загружен · '
-                             f'<a href="{E(comment_url(eid, cid))}" target="_blank" rel="noopener">открыть на DTF</a></div>')
+                             f'<a href="{E(comment_url(eid, cid))}"{EXT_LINK}>открыть на DTF</a></div>')
     else:
         by_id, chain = gv["by_id"], gv["chain"]
         if len(chain) > 1:
             flat = "".join(f'<div class="c-node ctx">{cv.one(by_id[a], eid, True)}</div>' for a in chain[:-1])
             n = len(chain) - 1
-            parts.append(f'<details class="ctx-more"><summary>{icon("keyboard_arrow_down")}Ещё {n} выше по ветке</summary>'
-                         f'{flat}</details>')
+            parts.append(fold(f"Ещё {n} выше по ветке", flat, "ctx-more"))
         if chain:
             parts.append(f'<div class="c-node ctx">{cv.one(by_id[chain[-1]], eid, True)}</div>')
         keep = {k: by_id[k] for k in gv["keep"]}
@@ -396,17 +399,13 @@ PER_PAGE = 50
 def _year_range(year: str) -> tuple[int | None, int | None]:
     if not re.fullmatch(r"\d{4}", year or ""):
         return None, None
-    import datetime as _dt
-    from ..util import MSK
     return (int(_dt.datetime(int(year), 1, 1, tzinfo=MSK).timestamp()),
             int(_dt.datetime(int(year) + 1, 1, 1, tzinfo=MSK).timestamp()))
 
 
 def page_search(v: ArchiveView, q: str, kind: str, year: str, sort: str, page: int, exact: bool = False,
-                group: bool = True) -> tuple[str, str]:
-    import urllib.parse as up
-    from ..normalize import comment_text
-    from ..search.engine import has_index, search
+                group: bool = True, rebuild: Any = lambda action: "") -> tuple[str, str]:
+    """`rebuild(action)`: a form with the "rebuild" button (the page doesn't have the CSRF token itself)."""
 
     def link(**ch: Any) -> str:
         params = {"q": q, "t": kind, "y": year, "s": sort, "g": "1" if group else "0", "exact": "1" if exact else ""}
@@ -422,23 +421,27 @@ def page_search(v: ArchiveView, q: str, kind: str, year: str, sort: str, page: i
     years = sorted({r[0][:4] for r in db.execute("SELECT ym FROM months")} |
                    {ts_date(r[0])[-4:] for r in db.execute("SELECT date FROM posts")}, reverse=True)
     sort = sort if sort in ("rank", "date", "old") else "rank"
+    if not v.comments_on:   # posts only: nothing to choose between, nothing to group
+        kind, group = "", False
+    grouping = (f'<label class="chip" title="Показывать найденные комментарии вместе с постом или веткой, где они '
+                f'написаны"><input type="checkbox" name="g" value="1"{" checked" if group else ""}>'
+                f'{icon("check", cls="ck")}Группировать по постам</label><input type="hidden" name="g" value="0">')
     form = (f'<form class="sform" action="{E(v.links.search())}" data-autosubmit>'
             f'<div class="sbar">{icon("search")}<input type="search" name="q" value="{E(q)}" autofocus '
-            f'placeholder="Поиск по постам и комментариям" aria-label="Что искать">'
+            f'placeholder="{"Поиск по постам и комментариям" if v.comments_on else "Поиск по постам"}" aria-label="Что искать">'
             f'{icon_btn("arrow_forward", "Найти", submit=True)}</div>'
-            f'<div class="chips scroll">{select("t", KINDS, kind, "", "Где искать")}'
+            f'<div class="chips scroll">{select("t", KINDS, kind, "", "Где искать") if v.comments_on else ""}'
             f'{select("y", [("", "Все годы")] + [(y, y) for y in years], year, "", "Год")}'
             f'{select("s", SORTS, sort, "rank", "Порядок")}'
-            f'<label class="chip"><input type="checkbox" name="g" value="1"{" checked" if group else ""}>'
-            f'{icon("check", cls="ck")}По постам</label><input type="hidden" name="g" value="0"></div></form>{SEARCH_HELP}')
+            f'{grouping if v.comments_on else ""}</div></form>{SEARCH_HELP}')
     head = page_head("Поиск")
     if not q.strip():
         db.close()
         return "Поиск", head + form
     if not has_index(db):
         db.close()
-        return "Поиск", head + form + banner("warn", f'Поисковый индекс устарел — нажмите «Пересобрать» на странице '
-                                                     f'<a href="{E(v.links.sync())}">синхронизации</a>.')
+        return "Поиск", head + form + banner("warn", "Поиску нужно пересобрать страницы архива — это займёт пару "
+                                                     "минут и не требует интернета." + rebuild(v.links.action("render")))
     a, b = _year_range(year)
     res = search(db, q, kind, a, b, sort, page, PER_PAGE, exact)
     if res.error:
@@ -474,9 +477,7 @@ def page_search(v: ArchiveView, q: str, kind: str, year: str, sort: str, page: i
     mk = res.marker
 
     def who(aid: Any) -> str:
-        u = v.users.get(aid) or {}
-        return (f'<span class="ca">{avatar(avatar_src(v.resolver, u.get("avatar")))}'
-                f'{E(u.get("name") or (f"id{aid}" if aid else "аноним"))}</span>')
+        return f'<span class="ca">{v.cv.avatar_html(aid)}{E(v.cv.author_name(aid))}</span>'
 
     def comment_hit(h: Any) -> str:
         c = cmts.get(h.ref) or {}
@@ -502,8 +503,8 @@ def page_search(v: ArchiveView, q: str, kind: str, year: str, sort: str, page: i
 
     def header(eid: int | None, n: int = 0) -> str:
         title, sub, own = entries.get(eid or 0, ("", None, False))
-        badge = (f'<span class="badge sg-n">{n} {plural(n, "совпадение", "совпадения", "совпадений")}</span>' if n > 1 else "")
-        return _entry_head(v, eid, title or "Пост", sub, own, badge, cls="sg-h")
+        n_hits = badge(count_label(n, "совпадение", "совпадения", "совпадений"), cls="sg-n") if n > 1 else ""
+        return _entry_head(v, eid, title or "Пост", sub, own, n_hits, cls="sg-h")
 
     blocks = []
     if group:
@@ -533,13 +534,13 @@ def page_reactions(v: ArchiveView, form: Any) -> tuple[str, str]:
     for row in v.rx.catalog():
         img = v.rx.img(row["id"], "/") or '<span class="rx-q">?</span>'
         neg = row["polarity"] == "negative"
-        cells.append(f'<label class="rx-cell"><input type="checkbox" name="neg" value="{E(str(row["id"]))}"'
-                     f'{" checked" if neg else ""}>{img}<span>{E(row["label"] or "")}</span>'
-                     f'<span class="rx-id">#{row["id"]}</span>'
+        cells.append(f'<label class="rx-cell" title="Реакция #{row["id"]}"><input type="checkbox" name="neg" '
+                     f'value="{E(str(row["id"]))}"{" checked" if neg else ""}>{img}<span>{E(row["label"] or "")}</span>'
                      f'{"<span class=rx-old>больше нет на сайте</span>" if row["retired"] else ""}'
                      f'<span class="rx-ck">{icon("check_circle", fill=True)}</span></label>')
     inner = (f'<p class="muted small rx-note">DTF считает любую реакцию как +1. Отметьте те, что в архиве считаются '
              f'дизлайками ▼ — рейтинги пересчитаются на всех страницах.</p><div class="rx-grid">{"".join(cells)}</div>'
-             f'<div class="savebar"><span>Отмеченные реакции — дизлайки ▼</span>{btn("Сохранить")}</div>')
-    body = page_head("Управление архивом") + manage_tabs(v.links, "reactions") + form(v.links.reactions(), inner)
+             f'<div class="savebar">{btn("Сохранить")}</div>')
+    body = (page_head("Управление архивом") + manage_tabs(v.links, "reactions") + "<!--flash-->"
+            + form(v.links.reactions(), inner))
     return "Реакции", body

@@ -29,14 +29,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
-from .context import ancestors, descendants, index_tree
+from .context import ancestors, index_tree, keep_ids
 from .normalize import MediaResolver, comment_text, html_to_text, media_info
 from .reactions import reaction_pairs, reactions_total
 from .search.engine import IndexWriter
-from .state import Archive, pack, unpack
+from .state import Archive, connect_ro, pack, unpack
 from .util import now_ts, read_json_gz, read_jsonl_gz, ts_month
 
 PAGE_SIZE = 300  # my comments per month page
+# raise when what a build produces changes (view.sqlite, md/, data/): the app rebuilds older archives by itself
+VIEW_FORMAT = 2
 
 VIEW_SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
@@ -57,10 +59,6 @@ CREATE TABLE comment_loc (id INTEGER PRIMARY KEY, ym TEXT, page INTEGER);
 """
 
 Progress = Callable[[str, int, int], None]
-
-
-def search_norm(s: str) -> str:
-    return (s or "").replace("ё", "е").replace("Ё", "Е")
 
 
 # ---------------------------------------------------------------------- slim comments
@@ -151,6 +149,7 @@ class Dataset:
         self._index: dict[int, tuple[dict, dict] | None] = {}
         self.listed: dict[int, int] = {}
         self.listed_at: int | None = None
+        self.comments = arch.settings()["scope"] != "posts"   # the archive keeps comments (setting "scope")
 
     def load(self, progress: Progress | None = None) -> "Dataset":
         a = self.arch
@@ -161,9 +160,12 @@ class Dataset:
             step("load-posts", i + 1, len(files))
         self.posts.sort(key=lambda p: (p.get("date") or 0, p["id"]), reverse=True)
         self.local_posts = {p["id"] for p in self.posts}
+        if not self.comments:   # posts only: comment files a stopped sync may have left behind are not read
+            step("load-comments", 1, 1)
+            return self._listing()
         for p in self.posts:
             tp = a.raw_post_tree(p["id"])
-            self.trees[p["id"]] = [slim_comment(c, self.users) for c in read_json_gz(tp).get("items", [])] if tp.exists() else []
+            self.trees[p["id"]] = [slim_comment(c, self.users) for c in read_json_gz(tp, {}).get("items", [])]
         seen: set[int] = set()
         my = []
         for f in sorted(glob.glob(str(a.raw / "my-comments" / "*.jsonl.gz"))):
@@ -183,6 +185,10 @@ class Dataset:
             if e.get("id") and e["id"] not in self.entries:
                 self.entries[e["id"]] = {"title": e.get("title"), "subsiteId": e.get("subsiteId"),
                                          "subsiteName": e.get("subsiteName")}
+        return self._listing()
+
+    def _listing(self) -> "Dataset":
+        a = self.arch
         if a.exists():
             self.listed_at = a.get_meta("posts_listed_at")
             self.listed = {r[0]: r[1] for r in a.db.execute("SELECT id, listed_at FROM main.posts")}
@@ -266,12 +272,7 @@ def group_view(idx: tuple[dict, dict] | None, mine_ids: list[int], root_id: int)
     if not idx or not any(m in idx[0] for m in mine):
         return {"standalone": True}
     by_id, children = idx
-    keep: set[int] = set()
-    for m in mine:
-        if m in by_id:
-            keep.add(m)
-            keep.update(a for a in ancestors(m, by_id) if a in by_id)
-            keep.update(descendants(m, children))
+    keep = keep_ids(mine, by_id, children)
     kids = {k: [x for x in v if x in keep] for k, v in children.items() if k in keep}
     chain: list[int] = []
     cur = root_id if root_id in keep else min(keep, key=lambda i: by_id[i].get("level", 0))
@@ -360,7 +361,8 @@ def build_view(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: Me
                 db.execute("INSERT OR REPLACE INTO comment_loc VALUES (?,?,?)", (cid, ym, g["page"]))
     step("build-months", 1, 1)
 
-    meta = {"built_at": now_ts(), "tool_version": __version__, "uid": ds.uid, "nick": ds.nick,
+    meta = {"built_at": now_ts(), "tool_version": __version__, "view_format": VIEW_FORMAT, "uid": ds.uid, "nick": ds.nick,
+            "comments": ds.comments,
             "profile": ds.prof, "counts": {"posts": len(ds.posts), "my_comments": len(ds.my),
                                            "post_comments": sum(len(v) for v in ds.trees.values()),
                                            "context_entries": len(ds.threads)}}
@@ -388,8 +390,7 @@ def open_view(arch: Archive) -> sqlite3.Connection | None:
     if not arch.view_path.exists():
         return None
     try:
-        db = sqlite3.connect(f"file:{arch.view_path.as_posix()}?mode=ro", uri=True, timeout=30, check_same_thread=False)
-        db.row_factory = sqlite3.Row
+        db = connect_ro(arch.view_path, timeout=30)
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() is None:
             db.close()
             return None
@@ -408,3 +409,19 @@ def view_ready(arch: Archive) -> bool:
 
 def view_meta(db: sqlite3.Connection) -> dict:
     return {r[0]: json.loads(r[1]) for r in db.execute("SELECT key, value FROM meta")}
+
+
+def view_outdated(arch: Archive) -> bool:
+    """The archive has downloaded data but no view, or one built by an older LDTF (VIEW_FORMAT): rebuild it."""
+    if not arch.raw_profile().exists():
+        return False
+    db = open_view(arch)
+    if db is None:
+        return True
+    try:
+        row = db.execute("SELECT value FROM meta WHERE key='view_format'").fetchone()
+        return (json.loads(row[0]) if row else 1) < VIEW_FORMAT
+    except (sqlite3.Error, ValueError):
+        return True
+    finally:
+        db.close()

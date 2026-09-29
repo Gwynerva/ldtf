@@ -12,14 +12,38 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import DEFAULT_PORT, __version__
+from .guard import site_summary
 from .scheduler import human_when
+from .state import META_LAST_SYNC, META_SYNC_ATTEMPT, read_meta
 from .util import log
-from .web.jobs import job_percent
+from .web.jobs import BLOCKED, DONE, ERROR, PRIORITY_REASONS, RUNNING, RUNNING_TITLES
 from .web.server import Runtime, find_running
+from .web.ui import Links
 
 
-def run_app(library: Path, port: int = 8765, background: bool = False) -> int:
+def notice(job: Any, attempt: dict | None, site: dict | None) -> tuple[str, str] | None:
+    """(title, text) of a tray notification about a finished job, or None — only what the user needs to know:
+    a sync they started (or that created an archive) is done, own posts or comments disappeared from DTF, the archive
+    guard stopped a sync, a sync failed (once: not again on every retry). Scheduled syncs that went fine stay quiet."""
+    if job.kind != "sync":
+        return None
+    asked = job.params.get("reason") in PRIORITY_REASONS
+    if job.state == DONE:
+        own = site_summary({k: v for k, v in (site or {}).items() if k != "context"})
+        if not (asked or own):
+            return None
+        mins = max(1, round(((job.finished or time.time()) - (job.started or time.time())) / 60))
+        return (f"Архив @{job.nick} синхронизирован",
+                f"Готово за {mins} мин." + (f" На DTF пропало: {own} — в архиве сохранены." if own else ""))
+    if job.state == BLOCKED:
+        return f"Синхронизация @{job.nick} остановлена", (job.error or "нужна проверка")[:200]
+    if job.state == ERROR and (asked or int((attempt or {}).get("fails") or 1) <= 1):
+        return f"Ошибка синхронизации @{job.nick}", (job.error or "подробности в журнале")[:200]
+    return None
+
+
+def run_app(library: Path, port: int = DEFAULT_PORT, background: bool = False) -> int:
     running = find_running(library, port)
     if running:
         if not background:
@@ -90,10 +114,11 @@ class TrayUI:
     def status(self) -> dict:
         if self.stopping:
             return {"state": "sync", "tip": "LDTF — останавливается, прогресс сохраняется…"}
-        running = [j for j in self.app.jobs.active() if j.state == "running"]
+        running = [j for j in self.app.jobs.active() if j.state == RUNNING]
         if running:
-            parts = [f"@{j.nick} {job_percent(j.snapshot())}%" for j in running]
-            return {"state": "sync", "tip": "LDTF — синхронизация: " + ", ".join(parts)}
+            parts = [f"@{j.nick} {j.snapshot()['percent']}%" for j in running]
+            what = RUNNING_TITLES.get(running[0].kind, "синхронизация").lower() if len(running) == 1 else "синхронизация"
+            return {"state": "sync", "tip": f"LDTF — {what}: " + ", ".join(parts)}
         guarded = [a["nick"] for a in self.app.accounts() if a.get("guard")]
         if guarded:
             return {"state": "error", "tip": f"LDTF — нужна проверка архива @{guarded[0]}: синхронизация остановлена"}
@@ -121,9 +146,10 @@ class TrayUI:
 
     # ------------------------------------------------------------------ actions
     def sync_all(self) -> None:
-        from .state import archive_dirs
-        for d in archive_dirs(self.app.library):
-            self.app.jobs.submit(d.name, "sync", reason="manual")
+        """Every archive except the ones the archive guard stopped (they wait for the user's decision)."""
+        for a in self.app.accounts():
+            if not a.get("guard"):
+                self.app.jobs.submit(a["nick"], "sync", reason="manual")
         self.tray.refresh()
 
     def toggle_autosync(self) -> None:
@@ -150,15 +176,7 @@ class TrayUI:
         self.tray.refresh()
         if job.kind != "sync" or not self.app.settings().get("notify", True) or self.stopping:
             return
-        link = lambda: self.open_ui(f"u/{job.nick}/sync")  # noqa: E731
-        if job.state == "done":
-            from .guard import site_summary
-            from .state import peek_meta
-            mins = max(1, round(((job.finished or time.time()) - (job.started or time.time())) / 60))
-            site = site_summary(((peek_meta(self.app.library / job.nick, "last_sync") or {}).get("stats") or {}).get("site"))
-            text = f"Готово за {mins} мин." + (f" На DTF пропало: {site} — в архиве сохранены." if site else "")
-            self.tray.notify(f"Архив @{job.nick} синхронизирован", text, link)
-        elif job.state == "blocked":
-            self.tray.notify(f"Синхронизация @{job.nick} остановлена", (job.error or "нужна проверка")[:200], link)
-        elif job.state == "error":
-            self.tray.notify(f"Ошибка синхронизации @{job.nick}", (job.error or "подробности в журнале")[:200], link)
+        meta = read_meta(self.app.library / job.nick, (META_LAST_SYNC, META_SYNC_ATTEMPT)) or {}
+        n = notice(job, meta.get(META_SYNC_ATTEMPT), ((meta.get(META_LAST_SYNC) or {}).get("stats") or {}).get("site"))
+        if n:
+            self.tray.notify(n[0], n[1], lambda: self.open_ui(Links(job.nick).sync().lstrip("/")))
