@@ -23,7 +23,7 @@ from ..normalize import EXT_LINK
 from ..reactions import CONFIG_NAME, load_config
 from ..scheduler import human_when
 from ..scope import SCOPE_TITLES, comment_footprint, comments_kept, describe, has_comment_data
-from ..settings import CHOICES, DEFAULTS, LIMITS, clean_settings, save_settings
+from ..settings import CHOICES, DEFAULTS, LIMITS, SAVE_LOCK, clean_settings, log_changes, save_settings
 from ..state import META_GUARD, META_LAST_SYNC, Archive, read_meta
 from ..sync import status as status_text
 from ..util import (COMMENTS, FILES, POSTS, count_label, human_bytes, log, num, plural, short, ts_date, ts_human,
@@ -326,8 +326,8 @@ def group(ic: str, title: str, inner: str, cls: str = "") -> str:
 
 
 def drop_confirm(app: "App", arch: Archive, values: dict) -> str:
-    """Before an archive switches to posts only: what goes and how much space it frees; the form repeats every field
-    the user submitted, so nothing else they changed is lost."""
+    """Before an archive switches to posts only: what goes and how much space it frees; the card's form sends the
+    switch itself (`values`) with the confirmation. "Отмена" reloads the page: it shows what is saved."""
     fp = comment_footprint(arch)
     what = describe(fp)
     lost = (f'<p class="cc-warn">{icon("warning", fill=True)}<span>{count_label(fp["lost"], *COMMENTS)} уже удалены на '
@@ -343,42 +343,50 @@ def drop_confirm(app: "App", arch: Archive, values: dict) -> str:
             + btn("Отмена", "text", href=L.settings()) + "</div></section>")
 
 
+SCHEDULE_TITLES = (("daily", "Каждый день"), ("interval", "По интервалу"), ("off", "Выключена"))
+
+
+def form_view(s: dict) -> dict:
+    """An archive's settings as its form shows them: "из постов" is the same as "все" for an archive of posts only
+    (that choice is hidden there)."""
+    return dict(s, media="all") if s["scope"] == "posts" and s["media"] == "posts" else dict(s)
+
+
+def sched_note(app: "App", nick: str, mode: str) -> str:
+    """Under the schedule: when the next autosync is, or that all of them are paused (sent again after each change)."""
+    if mode != "off" and not app.settings().get("autosync", True):
+        return banner("warn", 'Автосинхронизация приостановлена для всех архивов — включите её в '
+                              '<a href="/app">настройках приложения</a>.', ic="pause_circle")
+    nxt = app.next_run(nick)
+    if nxt:
+        return f'<p class="sched-next">{icon("schedule")}Следующая автосинхронизация: {E(human_when(nxt))}</p>'
+    return ""
+
+
 def settings_page(app: "App", nick: str, notice: str = FLASH, confirm: dict | None = None) -> str:
+    """Every control saves itself when changed (app.js, one field at a time); `confirm`: the values sent without JS
+    that switch the archive to posts only (the page asks first)."""
     arch = app.archive(nick)
     assert arch is not None
-    s = dict(arch.settings(), **(clean_settings(confirm, arch.settings()) if confirm else {}))
+    s = form_view(dict(arch.settings(), **(clean_settings(confirm, arch.settings()) if confirm else {})))
     L = Links(nick)
     mode = s["schedule"]
-    nxt = app.next_run(nick)
-    paused = not app.settings().get("autosync", True)
-    if paused and mode != "off":
-        when = banner("warn", 'Автосинхронизация приостановлена для всех архивов — включите её в '
-                              '<a href="/app">настройках приложения</a>.', ic="pause_circle")
-    elif nxt:
-        when = f'<p class="sched-next">{icon("schedule")}Следующая автосинхронизация: {E(human_when(nxt))}</p>'
-    else:
-        when = ""
     purging = app.jobs.purging(nick)
     scope_hint = ("Идёт удаление комментариев — режим можно будет сменить, когда оно закончится." if purging else
                   "При переходе на «Только посты» сохранённые комментарии удаляются — LDTF сначала покажет, сколько "
                   "их и сколько места освободится.")
-    # "из постов" is the same as "все" for an archive of posts only (that choice is hidden there)
-    media = "all" if s["scope"] == "posts" and s["media"] == "posts" else s["media"]
     what = (setting("Материалы", scope_hint, seg_radio("scope", s["scope"], SCOPE_TITLES.items(), "Что сохранять",
                                                        disabled=purging), cls="seg-row scope-mode", tag="div")
-            + (hidden_input("scope", s["scope"]) if purging else "")
             + setting("Медиафайлы", "Что не скачано, страницы показывают с DTF, пока файл там есть.",
-                      seg_radio("media", media, MEDIA_MODE_TITLES.items(), "Какие медиафайлы скачивать"),
+                      seg_radio("media", s["media"], MEDIA_MODE_TITLES.items(), "Какие медиафайлы скачивать"),
                       cls="seg-row media-mode", tag="div"))
     sched = (f'<div class="sched">'
-             + seg_radio("schedule", mode, (("off", "Выключена"), ("interval", "По интервалу"), ("daily", "Раз в день")),
-                         "Режим автосинхронизации")
+             + seg_radio("schedule", mode, SCHEDULE_TITLES, "Режим автосинхронизации")
              + setting("Каждые, часов", "", number("schedule_hours", s["schedule_hours"], LIMITS), "when-interval")
              + setting("Время", "Если компьютер в это время выключен, синхронизация пройдёт после запуска LDTF.",
                        f'<input type="time" name="schedule_time" value="{E(s["schedule_time"])}">', "when-daily")
-             + when + "</div>")
-    inner = (group("inventory_2", "Что сохранять", what, "what") + group("event_repeat", "Автосинхронизация", sched)
-             + f'<div class="savebar">{btn("Сохранить")}</div>')
+             + f'<div data-region="sched">{sched_note(app, nick, mode)}</div></div>')
+    inner = group("inventory_2", "Что сохранять", what, "what") + group("event_repeat", "Автосинхронизация", sched)
     danger = app.shell.form(
         L.action("delete"),
         f'<p>Удаляет папку архива со всеми данными. Медиафайлы, нужные другим архивам, остаются. Действие необратимо.</p>'
@@ -386,22 +394,38 @@ def settings_page(app: "App", nick: str, notice: str = FLASH, confirm: dict | No
         f'<input class="inp" name="confirm" autocomplete="off" spellcheck="false"></label>'
         f'{btn("Удалить архив", "danger", "delete")}</div>', cls="card fgroup danger-zone")
     top = drop_confirm(app, arch, confirm) if confirm else notice
-    body = (page_head("Управление архивом") + manage_tabs(L, "settings") + top +
-            app.shell.form(L.settings(), inner, cls="settings") +
+    body = (page_head("Управление архивом") + manage_tabs(L, "settings") + f'<div data-region="notice">{top}</div>' +
+            app.shell.form(L.settings(), inner, cls="settings", autosave=True) +
             f'<section class="danger-sec">{sec_head("Опасная зона")}{danger}</section>')
     return app.page("Настройки", body, nick, active="settings")
 
 
 # ---------------------------------------------------------------------- app settings
+def autostart_note(state: str) -> str:
+    """What the switch alone can't say: Windows skips the entry, or it starts another copy of LDTF."""
+    if state == "disabled":
+        return banner("warn", "Windows не запускает LDTF: он выключен в списке автозагрузки Windows — «Параметры → "
+                              "Приложения → Автозагрузка» или вкладка «Автозагрузка» диспетчера задач. Включите LDTF там.")
+    if state == "elsewhere":
+        exe = win.command_exe(win.autostart_value() or "")
+        return banner("warn", f"С Windows сейчас запускается другая копия LDTF (<code>{E(exe)}</code>). Включите "
+                              f"автозапуск здесь, чтобы запускалась эта.")
+    return ""
+
+
 def app_settings_page(app: "App", notice: str = FLASH) -> str:
+    """Every control saves itself when changed (app.js, one field at a time)."""
     s = app.settings()
     tray = win.available()
+    start = notify = ""
     if tray:
-        # the shortcut buttons belong to a form of their own (form=...): Enter in the settings form saves them
+        state = win.autostart_state()
+        # the shortcut buttons belong to a form of their own (form=...), the settings form has no buttons at all
         shortcut = lambda where, label: btn(label, "outlined sm", attrs=f' form="shortcuts" formaction="/app/shortcut?where={where}"')  # noqa: E731
         start = group("power_settings_new", "Запуск",
                       setting("Запускать вместе с Windows", "LDTF тихо стартует в трее после входа в систему; "
-                              "синхронизации идут по расписанию.", switch("autostart", win.autostart_enabled()))
+                              "синхронизации идут по расписанию.", switch("autostart", state in win.OWN_ENTRY))
+                      + f'<div data-region="autostart">{autostart_note(state)}</div>'
                       + setting("Открывать браузер при запуске", "Когда LDTF запускают вручную.",
                                 switch("open_browser", s["open_browser"]))
                       + '<div class="setting"><span class="setting-t"><span class="field-l">Ярлыки с иконкой LDTF</span>'
@@ -409,13 +433,10 @@ def app_settings_page(app: "App", notice: str = FLASH) -> str:
                       + shortcut("desktop", "На рабочий стол") + shortcut("startmenu", "В меню Пуск") + "</span></div>")
         notify = setting("Уведомления в трее", "Когда закончилась синхронизация, запущенная вручную, и когда что-то "
                          "пошло не так.", switch("notify", s["notify"]))
-    else:
-        start = hidden_input("open_browser", "1" if s["open_browser"] else "0")
-        notify = hidden_input("notify", "1" if s["notify"] else "0")
     sync = group("sync", "Синхронизация",
                  setting("Автосинхронизация по расписанию", "Расписание задаётся в настройках каждого архива. "
                          "Выключите, чтобы приостановить все.", switch("autosync", s["autosync"])) + notify)
-    form = app.shell.form("/app", start + sync + f'<div class="savebar">{btn("Сохранить")}</div>', cls="settings")
+    form = app.shell.form("/app", start + sync, cls="settings", autosave=True)
     if tray:
         form += app.shell.form("/app/shortcut", "", fid="shortcuts")
     row = lambda label, hint, control="": (f'<div class="setting"><span class="setting-t"><span class="field-l">{label}</span>'  # noqa: E731
@@ -471,6 +492,22 @@ def form_values(f: dict) -> dict:
     return {k: v[0] for k, v in f.items() if k != "_csrf"}
 
 
+def saved(h: "Handler", back: str, note: str, values: dict | None = None, regions: dict | None = None,
+          flash: str = "") -> None:
+    """The answer to a change of settings. app.js gets JSON: what is saved now (the page sets every control to it) and
+    fresh parts of the page by data-region; a form sent without JS goes back to the page with the outcome."""
+    if h.wants_json():
+        return h.json({"ok": True, "note": note, "values": values or {}, "regions": regions or {}})
+    return h.redirect(back, flash=flash or snackbar(note))
+
+
+def failed(h: "Handler", back: str, text: str) -> None:
+    """A change that could not be made (app.js puts the control back and says why)."""
+    if h.wants_json():
+        return h.json({"error": text}, 500)
+    return h.redirect(back, flash=banner("err", E(text)))
+
+
 # ------------------------------------------------ app-level actions: handler(h, app, fields, val)
 def post_add(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
     ident = val("user")
@@ -494,17 +531,25 @@ def post_add(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None
 
 
 def post_app_settings(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
+    """A change of the app settings: only the fields sent change (app.js sends the one control that changed, a switch
+    as "1" / "0"); the autostart entry is written only when its own switch was changed."""
     values = form_values(f)
-    if win.available():
-        want = values.pop("autostart", "") == "1"
-        if want != win.autostart_enabled():
+    note = "Сохранено"
+    if "autostart" in values:
+        want = values.pop("autostart").lower() in ("1", "true", "on", "yes")
+        if win.available():
             try:
-                win.set_autostart(want)
+                now = win.set_autostart(want, source="настройки")
             except OSError as e:
-                return h.redirect("/app", flash=banner("err", f"Не удалось изменить автозапуск: {E(str(e))}"))
-    app.save_settings(values)
+                return failed(h, "/app", f"Не удалось изменить автозапуск: {e}")
+            if now != want:
+                return failed(h, "/app", "Windows не дал изменить автозапуск.")
+            note = "Автозапуск включён" if want else "Автозапуск выключен"
+    s = app.save_settings(values) if values else app.settings()
     app.invalidate()
-    return h.redirect("/app", flash=snackbar("Настройки сохранены"))
+    state = win.autostart_state()
+    return saved(h, "/app", note, values={**s, "autostart": state in win.OWN_ENTRY},
+                 regions={"autostart": autostart_note(state)})
 
 
 def post_shortcut(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
@@ -577,17 +622,22 @@ def post_guard(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[.
 
 
 def post_settings(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[..., str]) -> None:
-    """Save the archive's settings. Switching to posts only drops the comments the archive has: first the user sees
-    what goes (the page asks again), then the purge runs as a job (its progress shows on the sync tab)."""
+    """A change of the archive's settings: only the fields sent change (app.js sends the one control that changed).
+    Switching to posts only drops the comments the archive has: first the user sees what goes (a confirmation card),
+    then the purge runs as a job (its progress shows on the sync tab)."""
     nick, L = arch.nick, Links(arch.nick)
     values = form_values(f)
     confirmed = values.pop("confirm_drop", "") == "1"
     old = arch.settings()
     if app.jobs.purging(nick):   # the switch is locked while comments are being dropped
-        values["scope"] = old["scope"]
+        values.pop("scope", None)
+    if old["scope"] == "posts" and values.get("scope") == "all" and "media" not in values and old["media"] == "posts":
+        values["media"] = "all"   # an archive of posts only showed "из постов" as "все": keep what the page showed
     new = clean_settings(values, old)
     if comments_kept(old) and not comments_kept(new) and has_comment_data(arch):
         if not confirmed:
+            if h.wants_json():   # nothing is saved: the card's own form sends the switch with the confirmation
+                return h.json({"confirm": drop_confirm(app, arch, {"scope": new["scope"]})})
             return h.html(settings_page(app, nick, confirm=values))
         save_settings(arch.settings_path, values)
         job = app.jobs.for_nick(nick)
@@ -597,28 +647,37 @@ def post_settings(h: "Handler", app: "App", arch: Archive, f: dict, val: Callabl
         app.invalidate()
         log.info(f"[app] @{nick}: архив переключён на «Только посты», комментарии удаляются")
         return h.redirect(L.sync(), flash=snackbar("Архив хранит только посты — комментарии удаляются"))
-    save_settings(arch.settings_path, values)
+    s = save_settings(arch.settings_path, values)
     app.invalidate()
-    note = snackbar("Настройки сохранены")
+    regions = {"sched": sched_note(app, nick, s["schedule"])}
+    flash = ""
     if not comments_kept(old) and comments_kept(new):
-        note = banner("info", "Комментарии загрузятся при следующей синхронизации — первая выгрузка активного "
-                              "пользователя занимает до пары часов."
-                      + app.shell.form(L.action("sync/start"), btn("Синхронизировать сейчас", "text", "sync")))
-    return h.redirect(L.settings(), flash=note)
+        flash = regions["notice"] = banner(
+            "info", "Комментарии загрузятся при следующей синхронизации — первая выгрузка активного пользователя "
+                    "занимает до пары часов."
+                    + app.shell.form(L.action("sync/start"), btn("Синхронизировать сейчас", "text", "sync")))
+    return saved(h, L.settings(), "Сохранено", values=form_view(s), regions=regions, flash=flash)
 
 
 def post_reactions(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[..., str]) -> None:
-    cfg = load_config(arch.root)
+    """The reactions counted as dislikes: the whole set comes with every change (app.js adds an empty value, so
+    "none" still sends the field)."""
     neg: list[Any] = []
     for x in f.get("neg", []):
+        if not x.strip():
+            continue
         try:
             neg.append(int(x))
         except ValueError:
             neg.append(x)
-    cfg["negative"] = neg
-    write_json(arch.root / CONFIG_NAME, cfg)
+    with SAVE_LOCK:
+        cfg = load_config(arch.root)
+        old = cfg.get("negative")
+        cfg["negative"] = neg
+        write_json(arch.root / CONFIG_NAME, cfg)
+    log_changes(f"@{arch.nick}", {"дизлайки": old}, {"дизлайки": neg})
     app.invalidate(arch.nick)
-    return h.redirect(Links(arch.nick).reactions(), flash=snackbar("Сохранено — рейтинги пересчитаны"))
+    return saved(h, Links(arch.nick).reactions(), "Сохранено — рейтинги пересчитаны", values={"neg": [str(x) for x in neg]})
 
 
 def post_delete(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[..., str]) -> None:

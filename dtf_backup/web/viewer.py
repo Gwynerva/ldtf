@@ -539,8 +539,8 @@ def page_reactions(v: ArchiveView, form: Any) -> tuple[str, str]:
                      f'{"<span class=rx-old>больше нет на сайте</span>" if row["retired"] else ""}'
                      f'<span class="rx-ck">{icon("check_circle", fill=True)}</span></label>')
     inner = (f'<p class="muted small rx-note">DTF считает любую реакцию как +1. Отметьте те, что в архиве считаются '
-             f'дизлайками ▼ — рейтинги пересчитаются на всех страницах.</p><div class="rx-grid">{"".join(cells)}</div>'
-             f'<div class="savebar">{btn("Сохранить")}</div>')
+             f'дизлайками ▼ — рейтинги пересчитаются на всех страницах. Выбор сохраняется сразу.</p>'
+             f'<div class="rx-grid">{"".join(cells)}</div>')
     body = (page_head("Управление архивом") + manage_tabs(v.links, "reactions") + "<!--flash-->"
             + form(v.links.reactions(), inner))
     return "Реакции", body

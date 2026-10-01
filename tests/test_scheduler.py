@@ -82,10 +82,40 @@ class SettingsTest(unittest.TestCase):
             lib = Path(d)
             self.assertEqual(load_app_settings(lib), {"autosync": True, "notify": True, "open_browser": True})
             # values of older versions (the network budget was a setting) are ignored, not an error
-            s = save_app_settings(lib, {"max_parallel": "9", "api_rate": "0.2", "autosync": "1", "notify": "1"})
-            self.assertEqual(s, {"autosync": True, "notify": True, "open_browser": False})
-            s = save_app_settings(lib, {"autosync": False}, partial=True)   # tray toggle keeps the rest
-            self.assertEqual((s["autosync"], s["notify"]), (False, True))
+            s = save_app_settings(lib, {"max_parallel": "9", "api_rate": "0.2", "notify": "0"})
+            self.assertEqual(s, {"autosync": True, "notify": False, "open_browser": True})
+            # one control at a time: a switch that isn't sent keeps its value (never "unchecked = off")
+            s = save_app_settings(lib, {"autosync": "0"})
+            self.assertEqual(s, {"autosync": False, "notify": False, "open_browser": True})
+            self.assertEqual(load_app_settings(lib), s)
+
+    def test_defaults_daily_at_nine(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "settings.json"
+            s = load_settings(p)
+            self.assertEqual((s["schedule"], s["schedule_time"]), ("daily", "09:00"))
+            self.assertEqual(save_settings(p, {"media": "off"})["schedule"], "daily")
+            # a daily schedule without a time (a hand-edited file) runs at 09:00
+            self.assertEqual(next_run({"schedule": "daily"}, ts(2026, 9, 1, 10), None, ts(2026, 9, 1, 11)), ts(2026, 9, 2, 9))
+
+    def test_write_waits_out_a_reader(self) -> None:
+        """Windows: replacing a file fails for a moment while another thread or the antivirus has it open."""
+        import os
+        from unittest import mock
+        from dtf_backup.util import write_json
+        real, fails = os.replace, []
+
+        def flaky(src, dst):
+            if len(fails) < 2:
+                fails.append(dst)
+                raise PermissionError(13, "Access is denied")
+            return real(src, dst)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "app.json"
+            with mock.patch("dtf_backup.util.os.replace", flaky):
+                write_json(p, {"a": 1})
+            self.assertEqual((json.loads(p.read_text(encoding="utf-8")), len(fails)), ({"a": 1}, 2))
+            self.assertEqual([x.name for x in Path(d).iterdir()], ["app.json"])   # no temporary file left
 
 
 if __name__ == "__main__":

@@ -133,6 +133,17 @@ class AppTest(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code
 
+    def post_json(self, path: str, data: dict) -> tuple[int, dict]:
+        """A settings control saving itself (app.js): only that field is sent, the answer is JSON."""
+        body = urllib.parse.urlencode(data, doseq=True).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=body,
+                                     headers={"Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
     # ---------------------------------------------------------------- build + exports
     def test_view_and_exports(self) -> None:
         import sqlite3
@@ -214,38 +225,115 @@ class AppTest(unittest.TestCase):
         self.assertEqual(code, 200)
         for knob in ("Одновременно архивов", "Запросов к DTF", "Параллельных"):   # the app tunes the network itself
             self.assertNotIn(knob, body)
+        self.assertNotIn("savebar", body)                              # settings save themselves, no "Сохранить"
+        self.assertIn('data-autosave autocomplete="off"', body)
         token = re.search(r'name="_csrf" value="([^"]+)"', body).group(1)
         with mock.patch("dtf_backup.winintegration.available", lambda: False):   # never touch the real registry
             self.assertEqual(self.post("/app", {"_csrf": token, "autosync": "1", "notify": "1"}), 303)
             code, body, _ = self.get("/app")
-        self.assertIn("Настройки сохранены", body)                    # the outcome, once
-        self.assertNotIn("Настройки сохранены", self.get("/app")[1])
+        self.assertIn("Сохранено", body)                               # a form sent without JS: the outcome, once
+        self.assertNotIn("Сохранено", self.get("/app")[1])
         code, body, _ = self.get("/u/tester/settings")
         self.assertIn("Опасная зона", body)
         self.assertIn('name="schedule"', body)
+        self.assertNotIn("savebar", body)
         self.assertNotIn("refresh_days", body)                         # a tuning knob: settings.json / CLI only
+        self.assertLess(body.index('value="daily"'), body.index('value="interval"'))   # the default comes first
         self.assertEqual(self.post("/u/tester/settings", {"_csrf": token, "schedule": "daily", "schedule_time": "05:30",
                                                           "schedule_hours": "12", "media": "1", "scope": "all"}), 303)
         self.assertEqual(self.arch.settings()["schedule"], "daily")
         code, body, _ = self.get("/u/tester/settings")
         self.assertIn("Следующая автосинхронизация", body)
-        self.assertIn("Настройки сохранены", body)
+        self.assertIn("Сохранено", body)
 
-    def test_enter_on_app_settings_saves(self) -> None:
-        """The first submit button of the settings form is "Сохранить": the shortcut buttons belong to a form of their
-        own, so Enter in a field never creates a shortcut (and never drops the edits)."""
+    def test_autosave_app_settings(self) -> None:
+        """A page saves one control at a time: a switch the page shows off never turns other settings off, and the
+        autostart entry is written only by its own switch."""
+        from unittest import mock
+        from dtf_backup.appsettings import load_app_settings
+        calls: list = []
+        self.app.save_settings({"autosync": True, "notify": True, "open_browser": True})
+        try:
+            with mock.patch("dtf_backup.winintegration.available", lambda: True), \
+                    mock.patch("dtf_backup.winintegration.set_autostart", lambda on, **k: calls.append(on) or on), \
+                    mock.patch("dtf_backup.winintegration.autostart_state", lambda: "on" if calls and calls[-1] else "off"):
+                code, j = self.post_json("/app", {"_csrf": self.app.csrf, "notify": "0"})
+                self.assertEqual(code, 200)
+                self.assertEqual((j["values"]["notify"], j["values"]["autosync"], j["values"]["open_browser"]),
+                                 (False, True, True))
+                self.assertEqual(calls, [])                     # no autostart field: the registry is not touched
+                self.assertEqual(load_app_settings(self.library)["notify"], False)
+                code, j = self.post_json("/app", {"_csrf": self.app.csrf, "autostart": "1"})
+                self.assertEqual((code, calls, j["values"]["autostart"], j["note"]), (200, [True], True, "Автозапуск включён"))
+                self.assertIn("autostart", j["regions"])
+                self.assertEqual(load_app_settings(self.library)["notify"], False)   # the other switches stay
+                code, j = self.post_json("/app", {"_csrf": "from-another-life", "autosync": "0"})
+                self.assertEqual((code, j.get("stale")), (403, True))                  # an error the page can show
+                self.assertTrue(load_app_settings(self.library)["autosync"])
+        finally:
+            self.app.save_settings({"notify": True})
+
+    def test_autosave_archive_settings(self) -> None:
+        settings = dict(self.arch.settings())
+        try:
+            code, j = self.post_json("/u/tester/settings", {"_csrf": self.app.csrf, "schedule_hours": "999"})
+            self.assertEqual((code, j["values"]["schedule_hours"]), (200, 168))   # corrected: the page shows it
+            self.assertEqual(self.arch.settings()["schedule"], settings["schedule"])   # the rest stays
+            self.assertIn("sched", j["regions"])
+            # switching to posts only: nothing is saved before the user confirms in the card
+            code, j = self.post_json("/u/tester/settings", {"_csrf": self.app.csrf, "scope": "posts"})
+            self.assertEqual(code, 200)
+            self.assertIn("Перейти на «Только посты»", j["confirm"])
+            self.assertIn('name="confirm_drop"', j["confirm"])
+            self.assertEqual(self.arch.settings()["scope"], "all")
+        finally:
+            save_settings(self.arch.settings_path, settings)
+            self.app.invalidate()
+
+    def test_autosave_reactions(self) -> None:
+        from dtf_backup.reactions import CONFIG_NAME
+        cfg = self.arch.root / CONFIG_NAME
+        before = cfg.read_bytes() if cfg.exists() else None
+        try:
+            code, body, _ = self.get("/u/tester/reactions")
+            self.assertIn("data-autosave", body)
+            self.assertNotIn("savebar", body)
+            code, j = self.post_json("/u/tester/reactions", {"_csrf": self.app.csrf, "neg": ["", "1"]})
+            self.assertEqual((code, j["values"]["neg"]), (200, ["1"]))
+            code, j = self.post_json("/u/tester/reactions", {"_csrf": self.app.csrf, "neg": [""]})   # none checked
+            self.assertEqual((code, j["values"]["neg"]), (200, []))
+        finally:
+            if before is None:
+                cfg.unlink(missing_ok=True)
+            else:
+                cfg.write_bytes(before)
+            self.app.invalidate()
+
+    def test_form_token_survives_restart(self) -> None:
+        """A page opened before LDTF restarted still saves: the token is kept with the library."""
+        from dtf_backup.web.server import form_secret
+        self.assertEqual(form_secret(self.library), self.app.csrf)
+        self.assertTrue((self.library / ".state" / "app.secret").exists())
+
+    def test_app_settings_form_has_no_buttons(self) -> None:
+        """Settings save themselves: the settings form has no submit buttons (Enter never sends it), the shortcut
+        buttons belong to a form of their own; the page tells when Windows itself skips the autostart entry."""
         import re
         from unittest import mock
         with mock.patch("dtf_backup.winintegration.available", lambda: True), \
-                mock.patch("dtf_backup.winintegration.autostart_enabled", lambda: False):
+                mock.patch("dtf_backup.winintegration.autostart_state", lambda: "off"):
             _, body, _ = self.get("/app")
         form = re.search(r'<form method="post" action="/app"[^>]*>(.*?)</form>', body, re.S).group(1)
-        buttons = re.findall(r"<button[^>]*>[^<]*(?:<svg.*?</svg>)?[^<]*", form, re.S)
-        self.assertTrue(any("shortcut" in b for b in buttons), buttons)
-        self.assertTrue(all('form="shortcuts"' in b for b in buttons if "formaction" in b), buttons)
-        own = [b for b in buttons if 'form="' not in b]   # the buttons whose form is this one: the first is the default
-        self.assertIn("Сохранить", own[0])
+        buttons = re.findall(r"<button[^>]*>", form)
+        self.assertTrue(buttons)
+        self.assertTrue(all('form="shortcuts"' in b for b in buttons), buttons)
         self.assertIn('<form method="post" action="/app/shortcut" id="shortcuts">', body)
+        self.assertNotIn("Автозагрузка", body)
+        with mock.patch("dtf_backup.winintegration.available", lambda: True), \
+                mock.patch("dtf_backup.winintegration.autostart_state", lambda: "disabled"):
+            _, body, _ = self.get("/app")
+        self.assertIn("Автозагрузка", body)
+        self.assertRegex(body, r'name="autostart" value="1" checked')
 
     def test_guard_ui(self) -> None:
         from unittest import mock

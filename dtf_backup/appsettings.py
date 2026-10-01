@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .settings import clean, load_with_defaults
+from .settings import SAVE_LOCK, clean, load_with_defaults, log_changes
 from .util import write_json
 
 DEFAULTS: dict[str, Any] = {
@@ -25,13 +25,13 @@ def load_app_settings(library: Path) -> dict:
     return load_with_defaults(app_settings_path(library), DEFAULTS, LIMITS)
 
 
-def save_app_settings(library: Path, values: dict, partial: bool = False) -> dict:
-    """`partial`: update only the given keys (tray toggles); otherwise a full form (unchecked = False)."""
-    cur = load_app_settings(library)
-    if partial:
-        values = {**cur, **values}
-    s = clean(DEFAULTS, LIMITS, values, cur)
+def save_app_settings(library: Path, values: dict) -> dict:
+    """Change the given keys (a page sends only the control that changed, the tray one toggle); the rest stay."""
     p = app_settings_path(library)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    write_json(p, s)
+    with SAVE_LOCK:
+        cur = load_app_settings(library)
+        s = clean(DEFAULTS, LIMITS, values, cur)
+        if s != cur or not p.exists():
+            write_json(p, s)
+    log_changes("приложение", cur, s)
     return s

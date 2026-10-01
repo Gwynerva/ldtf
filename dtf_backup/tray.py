@@ -123,6 +123,8 @@ class Tray:
         self._notes: queue.Queue = queue.Queue()
         self._balloon_action: Callable[[], Any] | None = None
         self._taskbar_created = 0
+        self._added = False    # the icon is in the tray (at logon the taskbar may not be ready yet: retried)
+        self._add_fails = 0
         self.closing = threading.Event()
 
     # ------------------------------------------------------------------ public (any thread)
@@ -186,8 +188,15 @@ class Tray:
         nid = self._nid(NIF_MESSAGE | NIF_ICON | NIF_TIP)
         nid.hIcon = self._icon(self._state)
         nid.szTip = self._tip
-        if not self.shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
-            log.warning("[трей] не удалось добавить значок")
+        self._added = bool(self.shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)))
+        if self._added:
+            if self._add_fails:
+                log.info(f"[трей] значок добавлен с попытки {self._add_fails + 1}")
+            self._add_fails = 0
+        else:
+            if not self._add_fails:
+                log.warning("[трей] не удалось добавить значок — панель задач ещё не готова, повтор каждые 2 с")
+            self._add_fails += 1
 
     def _update(self) -> None:
         st = self._safe_status()
@@ -268,6 +277,9 @@ class Tray:
                     self._show_menu()
                 elif event == NIN_BALLOONUSERCLICK and self._balloon_action:
                     self._run(self._balloon_action)
+                return 0
+            if msg == WM_TIMER and not self._added:
+                self._add_icon()
                 return 0
             if msg == WM_TIMER or msg == WM_WAKE:
                 self._update()

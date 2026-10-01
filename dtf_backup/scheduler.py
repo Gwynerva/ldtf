@@ -1,7 +1,7 @@
 """Automatic sync of the archives: when each one is due (pure functions) and the app's scheduler thread.
 
-Per archive (settings.json): `schedule` = off | interval (every `schedule_hours`) | daily (at `schedule_time`,
-local time). A run missed while the computer was off or asleep happens as soon as the app is up again.
+Per archive (settings.json): `schedule` = daily (at `schedule_time`, local time; the default: 09:00) | interval
+(every `schedule_hours`) | off. A run missed while the computer was off or asleep happens as soon as the app is up again.
 After a failed sync (network, DTF limits) the next try waits 30 min, 1 h, 2 h, 4 h, 8 h instead of hammering.
 """
 
@@ -24,7 +24,7 @@ def next_run(s: dict, last_ok: float | None, attempt: dict | None, now: float) -
     if mode == "interval":
         due = (last_ok + float(s.get("schedule_hours") or 12) * 3600) if last_ok else now
     elif mode == "daily":
-        hh, mm = (int(x) for x in str(s.get("schedule_time") or "04:00").split(":"))
+        hh, mm = (int(x) for x in str(s.get("schedule_time") or "09:00").split(":"))
         if not last_ok:
             due = now
         else:

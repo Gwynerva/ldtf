@@ -51,6 +51,8 @@ def run_app(library: Path, port: int = DEFAULT_PORT, background: bool = False) -
         return 0
     rt = Runtime(library, port, scheduler_delay=120.0 if background else 10.0).start()
     app = rt.app
+    log.info("[app] " + ("запущен в фоне (--background: так его запускает автозапуск с Windows)" if background
+                         else "запущен вручную"))
 
     def open_ui(path: str = "") -> None:
         webbrowser.open(rt.url + path.lstrip("/"))
@@ -139,7 +141,7 @@ class TrayUI:
                        tm.MenuItem("Автосинхронизация по расписанию", self.toggle_autosync, checked=auto)]
         if win.available():
             items.append(tm.MenuItem("Запускать вместе с Windows", self.toggle_autostart,
-                                     checked=win.autostart_enabled()))
+                                     checked=win.autostart_state() in win.OWN_ENTRY))
         items += [tm.MenuItem("Настройки…", lambda: self.open_ui("app")), tm.SEP,
                   tm.MenuItem("Остановить LDTF", self.quit)]
         return items
@@ -153,13 +155,13 @@ class TrayUI:
         self.tray.refresh()
 
     def toggle_autosync(self) -> None:
-        self.app.save_settings({"autosync": not self.app.settings().get("autosync", True)}, partial=True)
+        self.app.save_settings({"autosync": not self.app.settings().get("autosync", True)})
         self._next = (0.0, None)
         self.tray.refresh()
 
     def toggle_autostart(self) -> None:
         try:
-            self.win.set_autostart(not self.win.autostart_enabled())
+            self.win.set_autostart(self.win.autostart_state() not in self.win.OWN_ENTRY, source="трей")
         except OSError as e:
             self.tray.notify("LDTF", f"Не удалось изменить автозапуск: {e}")
 

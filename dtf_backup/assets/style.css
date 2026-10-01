@@ -12,7 +12,7 @@
   --bg: #f3f4f9; --card: #ffffff;
   --sc-low: #f1f2f8; --sc: #ebecf3; --sc-high: #e5e7ee; --sc-highest: #dfe1e9;
   --on-surface: #191c21; --on-surface-variant: #4a4d56; --outline: #74777f; --outline-variant: #d4d6df;
-  --inverse-surface: #2e3036; --inverse-on-surface: #eff0f7;
+  --inverse-surface: #2e3036; --inverse-on-surface: #eff0f7; --inverse-primary: #adc6ff;
   --pos: #1b8a47; --neg: #d73a3a; --mark: #ffe28a; --mine: #fff5d9;
   --shadow-1: 0 1px 2px rgba(20, 25, 40, .07), 0 1px 3px rgba(20, 25, 40, .05);
   --shadow-2: 0 2px 8px rgba(20, 25, 40, .10), 0 1px 2px rgba(20, 25, 40, .06);
@@ -39,7 +39,7 @@
   --bg: #111318; --card: #1b1e24;
   --sc-low: #1f2228; --sc: #23262c; --sc-high: #2b2e35; --sc-highest: #353840;
   --on-surface: #e2e2e9; --on-surface-variant: #c2c5cf; --outline: #8e9099; --outline-variant: #3d4047;
-  --inverse-surface: #e2e2e9; --inverse-on-surface: #2e3036;
+  --inverse-surface: #e2e2e9; --inverse-on-surface: #2e3036; --inverse-primary: #2a5fc8;
   --pos: #5fd08a; --neg: #ff7b72; --mark: #6a5200; --mine: #2f2916;
   --shadow-1: none; --shadow-2: 0 2px 8px rgba(0, 0, 0, .35); --shadow-3: 0 10px 28px rgba(0, 0, 0, .55);
 }
@@ -289,7 +289,10 @@ html.scrolled .appbar-in { box-shadow: var(--shadow-2); }
   border-radius: var(--r-xs); background: var(--inverse-surface); color: var(--inverse-on-surface); box-shadow: var(--shadow-3);
   font-size: 14px; overflow-wrap: anywhere; animation: snack-in .25s var(--ease); transition: opacity .3s, transform .3s; }
 .snackbar.out { opacity: 0; transform: translate(-50%, 8px); }
-body:has(.savebar) .snackbar { bottom: calc(88px + var(--navbar-h)); }   /* above the save button, not over it */
+.snackbar > span { flex: 1; min-width: 0; }
+.snackbar > .btn.text { flex: none; margin: -6px -8px -6px 0; color: var(--inverse-primary); }
+.snackbar.err { background: var(--error-container); color: var(--on-error-container); }
+.snackbar.err > .btn.text { color: inherit; }
 @keyframes snack-in { from { opacity: 0; transform: translate(-50%, 12px); } }
 
 .empty { padding: 56px 16px; text-align: center; color: var(--on-surface-variant); }
@@ -720,13 +723,15 @@ details.fold > summary:hover { background: var(--hover); }
 .fgroup { margin: 0 0 16px; padding: 20px 24px 24px; }
 .fgroup > h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; font-size: 18px; }
 .setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; cursor: pointer; }
-.setting + .setting { border-top: 1px solid var(--outline-variant); }
+.setting + .setting, [data-region] + .setting { border-top: 1px solid var(--outline-variant); }
+.fgroup [data-region="autostart"] > .banner { margin: 0 0 12px; }   /* a note under the switch it is about */
 .setting-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .setting input[type=number], .setting input[type=time] { flex: none; width: 128px; height: 44px; padding: 0 12px;
   border: 1px solid var(--outline); border-radius: var(--r-xs); background: transparent; color: var(--on-surface);
   font: 400 16px var(--font); }
 .setting input[type=number]:focus, .setting input[type=time]:focus { outline: none; border-color: var(--primary);
   box-shadow: inset 0 0 0 1px var(--primary); }
+.setting input:invalid { border-color: var(--error); box-shadow: inset 0 0 0 1px var(--error); }   /* not saved */
 .btn-row { display: flex; flex-wrap: wrap; gap: 8px; flex: none; }
 /* schedule: segmented radio + only the field of the chosen mode (no JS) */
 .sched .seg { margin: 4px 0 8px; }
@@ -747,8 +752,6 @@ details.fold > summary:hover { background: var(--hover); }
   background: var(--secondary-container); color: var(--on-secondary-container); }
 .seg-radio:has(input:disabled) { opacity: .6; }
 .seg-radio:has(input:disabled) label { cursor: not-allowed; }
-.settings .savebar { margin: 8px 0 0; }
-.savebar:not(:has(> span)) { justify-content: flex-end; padding: 8px; }
 /* switching an archive to posts only: what goes */
 .confirm-card { margin: 0 0 16px; padding: 20px 24px; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--error) 45%, transparent); }
 .confirm-card .btn-row { margin-left: 42px; align-items: center; }
@@ -804,10 +807,6 @@ a.badge { text-decoration: none; }
 .rx-cell:has(input:checked) { background: color-mix(in srgb, var(--neg) 11%, var(--card)); box-shadow: inset 0 0 0 2px var(--neg); }
 .rx-cell:has(input:checked) .rx-ck { display: flex; }
 .rx-cell:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: 2px; }
-.savebar { position: sticky; bottom: calc(12px + var(--navbar-h)); z-index: var(--z-sticky); display: flex; align-items: center; flex-wrap: wrap;
-  gap: 8px 16px; margin-top: 16px; padding: 12px 12px 12px 20px; border-radius: var(--r-lg); background: var(--sc-high);
-  box-shadow: var(--shadow-2); font-size: 14px; color: var(--on-surface-variant); }
-.savebar span { flex: 1 1 auto; min-width: 0; }
 .rx-note { margin: 0 0 12px; }
 
 /* diagnostics */
@@ -905,7 +904,6 @@ a.badge { text-decoration: none; }
   .acc-when { display: block; }
   .pv { flex-direction: column; }
   .seg button { padding: 0 12px; }
-  .savebar { flex-wrap: nowrap; padding: 8px 8px 8px 16px; font-size: 13px; }
   .rx-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
   .rx-cell { padding: 12px 4px 8px; font-size: 12px; }
   .rx-cell img, .rx-cell .rx-q { width: 36px; height: 36px; }

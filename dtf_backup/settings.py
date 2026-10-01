@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -14,26 +15,27 @@ DEFAULTS: dict[str, Any] = {
     "media": "all",          # media files to download: all | posts (+ avatars, reactions; no comment media) | off
     # how far back every sync re-checks replies, counters and deleted comments (not in the app: settings.json / CLI)
     "refresh_days": 30,
-    "schedule": "interval",  # automatic sync: off | interval (every N hours) | daily (at HH:MM)
+    "schedule": "daily",     # automatic sync: daily (at HH:MM, local time) | interval (every N hours) | off
     "schedule_hours": 12,
-    "schedule_time": "04:00",
+    "schedule_time": "09:00",
 }
 LIMITS = {"refresh_days": (0, 3650), "schedule_hours": (1, 24 * 7)}
-CHOICES = {"schedule": ("off", "interval", "daily"), "media": ("all", "posts", "off"), "scope": ("all", "posts")}
+CHOICES = {"schedule": ("daily", "interval", "off"), "media": ("all", "posts", "off"), "scope": ("all", "posts")}
 # values of older versions: "media" was an on/off switch (true/false in settings.json, "1"/missing from the form)
 LEGACY = {"media": {"true": "all", "1": "all", "on": "all", "yes": "all", "false": "off", "0": "off", "": "off",
                     "no": "off"}}
 TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+# read-modify-write of any settings file: the pages save one control at a time, the tray and the CLI save too
+SAVE_LOCK = threading.Lock()
 
 
 def clean(defaults: dict, limits: dict, values: dict, base: dict | None = None, choices: dict | None = None,
           legacy: dict | None = None) -> dict:
-    """Validate form/JSON values. A missing bool means an unchecked checkbox; other missing keys keep `base`."""
+    """Validate form/JSON values: a valid given value replaces the one of `base`, a missing key keeps it. The pages send
+    only the control that changed (a switch as "1" / "0"), so an old page can never switch off what it didn't show."""
     s = dict(base or defaults)
     for k, default in defaults.items():
         if k not in values:
-            if isinstance(default, bool):
-                s[k] = False
             continue
         v = values[k]
         if isinstance(default, bool):
@@ -107,6 +109,20 @@ def clean_settings(values: dict, base: dict | None = None) -> dict:
 
 
 def save_settings(path: Path, values: dict) -> dict:
-    s = clean_settings(values, load_settings(path))
-    write_json(path, s)
+    """Change the given keys of an archive's settings (the rest stay); returns what the file holds now."""
+    with SAVE_LOCK:
+        old = load_settings(path)
+        s = clean_settings(values, old)
+        if s != old or not path.exists():
+            write_json(path, s)
+    log_changes(f"@{path.parent.parent.name}", old, s)
     return s
+
+
+def log_changes(where: str, old: dict, new: dict) -> None:
+    """Every change of settings goes to the log: "[настройки] @petra: schedule interval → daily"."""
+    def show(v: Any) -> str:
+        return ("вкл" if v else "выкл") if isinstance(v, bool) else str(v)
+    changed = [f"{k} {show(old.get(k))} → {show(v)}" for k, v in new.items() if old.get(k) != v]
+    if changed:
+        log.info(f"[настройки] {where}: " + ", ".join(changed))

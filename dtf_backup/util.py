@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -93,13 +94,26 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
+
+
+def _replace(src: str, dst: Path, tries: int = 20) -> None:
+    """os.replace that waits out a reader: on Windows it fails while another thread or the antivirus has the target
+    open for a moment."""
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.05)
 
 
 def atomic_write_text(path: Path, text: str) -> None:

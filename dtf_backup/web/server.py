@@ -1,7 +1,8 @@
 """Local HTTP server of LDTF (stdlib ThreadingHTTPServer, bound to 127.0.0.1 only).
 
-Security: requests must carry a local Host header (no DNS rebinding); every form POST needs the per-run CSRF
-token and, when present, a local Origin (other sites in the browser can't trigger actions). The JSON job API used
+Security: requests must carry a local Host header (no DNS rebinding); every form POST needs the CSRF token of the
+library (kept in archive/.state/app.secret, so a page opened before a restart still works) and, when present, a local
+Origin (other sites in the browser can't trigger actions). The JSON job API used
 by the CLI (`dtf-backup sync` while the app runs) needs the per-run token from archive/.state/app.run.json.
 """
 
@@ -35,7 +36,7 @@ from ..reactions import CONFIG_NAME
 from ..scheduler import Scheduler, next_sync
 from ..scope import comments_kept, pending_drop
 from ..state import META_GUARD, Archive, archive_dirs, gc_pending, peek_meta
-from ..util import log, read_json_gz, write_json
+from ..util import atomic_write_text, log, read_json_gz, write_json
 from ..viewdb import open_view, view_meta, view_outdated, view_ready
 from . import app_pages, viewer
 from .jobs import KINDS, RUNNING, JobManager
@@ -55,7 +56,7 @@ class App:
         self.library = library.resolve()
         self.library.mkdir(parents=True, exist_ok=True)
         self.port = port
-        self.csrf = secrets.token_urlsafe(24)
+        self.csrf = form_secret(self.library)
         self.shell = Shell(self.csrf)
         self.lock = threading.Lock()
         self._views: dict[str, tuple[tuple, viewer.ArchiveView]] = {}
@@ -78,8 +79,9 @@ class App:
     def settings(self) -> dict:
         return self._settings
 
-    def save_settings(self, values: dict, partial: bool = False) -> dict:
-        s = self._settings = save_app_settings(self.library, values, partial)
+    def save_settings(self, values: dict) -> dict:
+        """Change the given keys (the rest stay)."""
+        s = self._settings = save_app_settings(self.library, values)
         return s
 
     def _job_finished(self, job: Any) -> None:
@@ -258,6 +260,10 @@ class Handler(BaseHTTPRequestHandler):
              "X-Frame-Options": "DENY"}
         h.update(headers or {})
         self.send_body(code, text.encode("utf-8"), "text/html; charset=utf-8", h, gz=True)
+
+    def wants_json(self) -> bool:
+        """A settings page saving one control (app.js): the answer is JSON, not a redirect."""
+        return "application/json" in (self.headers.get("Accept") or "")
 
     def json(self, obj: Any, code: int = 200) -> None:
         self.send_body(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8",
@@ -451,7 +457,7 @@ class Handler(BaseHTTPRequestHandler):
                                                  rebuild=lambda action: app.shell.form(action, btn("Пересобрать", "text",
                                                                                                    "restart_alt"))), "search"
             elif sub == "/reactions":
-                res, active = viewer.page_reactions(v, lambda action, inner: app.shell.form(action, inner)), "reactions"
+                res, active = viewer.page_reactions(v, lambda action, inner: app.shell.form(action, inner, autosave=True)), "reactions"
             else:
                 mm = re.fullmatch(r"/p/(\d+)", sub)
                 if mm:
@@ -485,7 +491,9 @@ class Handler(BaseHTTPRequestHandler):
         if mm:
             self.app.req.nick = urllib.parse.unquote(mm.group(1))
         f = self.form()
-        if (f.get("_csrf") or [""])[0] != self.app.csrf:
+        if not secrets.compare_digest((f.get("_csrf") or [""])[0].encode(), self.app.csrf.encode()):
+            if self.wants_json():
+                return self.json({"error": "Страница устарела — обновите её и повторите.", "stale": True}, 403)
             body = empty_state("lock", "Сессия устарела", "Приложение перезапускалось. Обновите страницу и повторите действие.",
                                tag="h1")
             return self.html(self.app.page("Сессия устарела", body), 403)
@@ -494,6 +502,8 @@ class Handler(BaseHTTPRequestHandler):
             return app_pages.handle_post(self, self.app, urllib.parse.urlsplit(self.path).path, f, val)
         except Exception as e:  # noqa: BLE001
             log.exception(f"[app] ошибка действия {self.path}")
+            if self.wants_json():
+                return self.json({"error": f"Ошибка: {type(e).__name__}: {e}"}, 500)
             return self.error_page(e)
 
 
@@ -548,6 +558,23 @@ def _ping(port: int) -> dict | None:
         return None
 
 
+def form_secret(library: Path) -> str:
+    """The CSRF token of the forms, made once per library: pages opened before a restart of LDTF still save."""
+    p = library / ".state" / "app.secret"
+    try:
+        token = p.read_text(encoding="utf-8").strip()
+        if len(token) >= 24:
+            return token
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(24)
+    try:
+        atomic_write_text(p, token + "\n")
+    except OSError as e:   # a read-only library: the token lives until the app stops
+        log.warning(f"[app] не удалось сохранить {p}: {e}")
+    return token
+
+
 def run_file(library: Path) -> Path:
     return library / ".state" / "app.run.json"
 
@@ -599,8 +626,10 @@ class Runtime:
         write_json(run_file(self.app.library), {"pid": os.getpid(), "port": self.port, "token": self.app.token,
                                                 "version": __version__, "started": int(time.time())})
         try:
-            from ..winintegration import refresh_autostart
-            refresh_autostart()
+            from .. import winintegration as win
+            if win.available():
+                win.refresh_autostart()
+                log.info(f"[автозапуск] {win.STATE_TITLES[win.autostart_state()]}")
         except Exception as e:  # noqa: BLE001 - a stale autostart entry must not stop the app
             log.warning(f"[app] не удалось обновить автозапуск: {e}")
         self._catch_up()

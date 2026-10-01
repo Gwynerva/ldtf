@@ -333,13 +333,16 @@ class Shell:
                 f'<script src="{Links.asset("app.js")}"></script>{extra}</body></html>\n')
 
     def form(self, action: str, inner: str, cls: str = "", confirm: str | None = None, hidden: bool = False,
-             fid: str = "") -> str:
+             fid: str = "", autosave: bool = False) -> str:
         """A POST form with the CSRF token; `confirm`: ask before sending; `hidden`: shown later by app.js;
-        `fid`: the form's id (buttons elsewhere on the page submit it with form="...")."""
+        `fid`: the form's id (buttons elsewhere on the page submit it with form="...");
+        `autosave`: settings - every control saves itself when changed (app.js), no "Save" button, and the browser
+        never restores states of its own on "Back"."""
         c = f' data-confirm="{E(confirm)}"' if confirm else ""
         k = f' class="{cls}"' if cls else ""
         i = f' id="{E(fid)}"' if fid else ""
-        return (f'<form method="post" action="{E(action)}"{i}{k}{c}{" hidden" if hidden else ""}>'
+        a = ' data-autosave autocomplete="off"' if autosave else ""
+        return (f'<form method="post" action="{E(action)}"{i}{k}{c}{a}{" hidden" if hidden else ""}>'
                 f'<input type="hidden" name="_csrf" value="{E(self.csrf)}">{inner}</form>')
 
 

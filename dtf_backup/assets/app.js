@@ -302,6 +302,97 @@
   document.querySelectorAll(".snackbar").forEach(function (s) {
     setTimeout(function () { s.classList.add("out"); setTimeout(function () { s.remove(); }, 400); }, 4000);
   });
+  function snack(text, err, action) {   // action: [label, onclick]; an error stays until it is closed
+    document.querySelectorAll(".snackbar").forEach(function (s) { s.remove(); });
+    var s = document.createElement("div"), t = document.createElement("span");
+    s.className = "snackbar" + (err ? " err" : "");
+    s.setAttribute("role", err ? "alert" : "status");
+    t.textContent = text;
+    s.appendChild(t);
+    if (err && !action) action = ["Закрыть", function () { s.remove(); }];
+    if (action) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "btn text sm"; b.textContent = action[0];
+      b.addEventListener("click", action[1]);
+      s.appendChild(b);
+    }
+    document.body.appendChild(s);
+    if (!err) setTimeout(function () { s.classList.add("out"); setTimeout(function () { s.remove(); }, 400); }, 2500);
+  }
+
+  // ---- settings save themselves: a control is saved as soon as it changes, and only that one field is sent, so a
+  // page opened long ago never overwrites other settings. Requests go one after another; the page then shows what the
+  // server really saved (a number out of range comes back corrected), a failed change is put back.
+  var saving = Promise.resolve();
+  function kept(el) { return el.type === "radio" || el.type === "checkbox" ? el.checked : el.value; }
+  function region(k, html) { document.querySelectorAll('[data-region="' + k + '"]').forEach(function (el) { el.innerHTML = html; }); }
+  function fieldBody(form, el) {
+    var p = new URLSearchParams(), csrf = form.querySelector('input[name="_csrf"]');
+    p.append("_csrf", csrf ? csrf.value : "");
+    if (el.type === "checkbox" && !el.classList.contains("switch")) {   // a set of checkboxes (reactions): all of it
+      p.append(el.name, "");
+      Array.prototype.forEach.call(form.elements, function (c) { if (c.name === el.name && c.checked) p.append(c.name, c.value); });
+    } else if (el.type === "checkbox") p.append(el.name, el.checked ? "1" : "0");
+    else p.append(el.name, el.value);
+    return p;
+  }
+  // what the server holds now: the state a failed change goes back to; the controls show it only when no other
+  // change is on the way (an older answer must not undo a newer click) and never in a field being typed in
+  function applyValues(form, values, show, sent) {
+    Array.prototype.forEach.call(form.elements, function (el) {
+      if (!el.name || el.type === "hidden" || !(el.name in values)) return;
+      var v = values[el.name], on = el.type === "radio" ? String(v) === el.value :
+        el.type === "checkbox" ? (Array.isArray(v) ? v.map(String).indexOf(el.value) >= 0 : v === true || v === "1") : null;
+      el.__saved = on === null ? String(v) : on;
+      if (!show || (on === null && el === document.activeElement && el.name !== sent)) return;
+      if (on === null) el.value = String(v); else el.checked = on;
+    });
+  }
+  function revert(form, name) {
+    Array.prototype.forEach.call(form.elements, function (el) {
+      if (el.name !== name || !("__saved" in el)) return;
+      if (el.type === "radio" || el.type === "checkbox") el.checked = el.__saved; else el.value = el.__saved;
+    });
+  }
+  function saved(form, name, j) {
+    form.__pending--;
+    if (j.confirm) {   // switching to posts only: nothing is saved until the user confirms in the card
+      region("notice", j.confirm);
+      var n = document.querySelector('[data-region="notice"]');
+      if (n) n.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (!j.ok) {
+      revert(form, name);
+      snack(j.error || "Настройка не сохранена", true, j.stale ? ["Обновить", function () { location.reload(); }] : null);
+      return;
+    }
+    applyValues(form, j.values || {}, !form.__pending, name);
+    Object.keys(j.regions || {}).forEach(function (k) { region(k, j.regions[k]); });
+    snack(j.note || "Сохранено");
+  }
+  function autosave(form, el) {
+    var name = el.name, body = fieldBody(form, el), url = form.getAttribute("action");
+    form.__pending = (form.__pending || 0) + 1;
+    saving = saving.then(function () {
+      return fetch(url, { method: "POST", body: body, headers: { Accept: "application/json" } })
+        .then(function (r) { return r.json().catch(function () { return { error: "LDTF ответил ошибкой " + r.status + " — настройка не сохранена" }; }); },
+              function () { return { error: "LDTF не отвечает — он запущен? Настройка не сохранена." }; })
+        .then(function (j) { saved(form, name, j); });
+    }).catch(function () {});
+  }
+  document.querySelectorAll("form[data-autosave]").forEach(function (form) {
+    Array.prototype.forEach.call(form.elements, function (el) { if (el.name) el.__saved = kept(el); });
+    form.addEventListener("change", function (e) {
+      var el = e.target;
+      if (!el.name || el.name === "_csrf" || el.form !== form) return;
+      if (el.checkValidity && !el.checkValidity()) { el.reportValidity(); return; }   // e.g. 0 hours: not sent
+      autosave(form, el);
+    });
+    form.addEventListener("submit", function (e) { e.preventDefault(); });   // Enter: the field saves on change anyway
+  });
+  // "Back" to a page of settings kept in memory: it could show states that are not saved any more
+  window.addEventListener("pageshow", function (e) { if (e.persisted && document.querySelector("form[data-autosave]")) location.reload(); });
 
   // ---- sync jobs: progress ring in the app bar, marks in the archive menu, the panel on /u/<nick>/sync
   function fmtN(n) { return String(Math.round(n || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, "\u00a0"); }

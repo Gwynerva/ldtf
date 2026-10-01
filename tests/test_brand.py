@@ -49,6 +49,30 @@ class WinIntegrationTest(unittest.TestCase):
         self.assertIn("--background", cmd)
         self.assertNotIn("--background", winintegration.command(background=False))
 
+    def test_autostart_state(self) -> None:
+        w = winintegration
+        mine = r'"C:\LDTF\runtime\pythonw.exe" -X utf8 -m dtf_backup app --background'
+        self.assertEqual(w.command_exe(mine), r"C:\LDTF\runtime\pythonw.exe")
+        self.assertEqual(w.command_exe(r"D:\x\pythonw.exe -m y"), r"D:\x\pythonw.exe")
+        self.assertEqual(w.state_of(None, None, mine), "off")
+        self.assertEqual(w.state_of(mine, None, mine), "on")
+        self.assertEqual(w.state_of(mine, bytes([2]) + bytes(11), mine), "on")
+        for flag in (1, 3, 7):   # turned off in Windows' startup apps: the entry stays, Windows skips it
+            self.assertEqual(w.state_of(mine, bytes([flag]) + bytes(11), mine), "disabled")
+        self.assertEqual(w.state_of(r"E:\other\pythonw.exe -m dtf_backup app", None, mine), "elsewhere")
+
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
+    def test_autostart_follows_only_a_moved_app(self) -> None:
+        w, root = winintegration, Path(r"C:\LDTF")
+        mine = r"C:\LDTF\runtime\pythonw.exe -X utf8 -m dtf_backup app --background"
+        exists = lambda p: "missing" not in p   # noqa: E731
+        self.assertFalse(w.needs_repoint(None, mine, exists, root))                        # autostart is off
+        self.assertFalse(w.needs_repoint(mine, mine, exists, root))
+        self.assertTrue(w.needs_repoint(r"D:\missing\pythonw.exe -m dtf_backup app", mine, exists, root))   # moved
+        self.assertTrue(w.needs_repoint(r"C:\LDTF\runtime\pythonw.exe -m dtf_backup app", mine, exists, root))   # updated
+        # another copy of LDTF (a download, a test run) must not take autostart over
+        self.assertFalse(w.needs_repoint(r"E:\LDTF-2\runtime\pythonw.exe -m dtf_backup app", mine, exists, root))
+
 
 if __name__ == "__main__":
     unittest.main()
