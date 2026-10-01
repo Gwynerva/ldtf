@@ -280,6 +280,8 @@ archive/                       библиотека приложения
   cover?, ...поля}}`, `supported`: `true` — полная поддержка, `"generic"` — упрощённо (исходник в `raw`), `false` —
   неизвестный тип (исходный JSON в `raw`). Медиа: `{{key, kind, local, remote, width, height, ...}}`
   (`local` — путь в общем хранилище, если файл скачан; `gone: true` — DTF ответил, что файла больше нет).
+  Блок `media`: `items[{{media, caption}}]` и `title`; `caption` — подпись автора к картинке, `title` — ко всей галерее
+  (есть не у всех; других описаний картинок DTF не хранит).
 - `post-comments.jsonl` — все комментарии под постами пользователя: `id, postId, parentId, level, date, author, isMine,
   text, media, likes, reactions, isRemoved, url`.
 - `comments.jsonl` — 1 строка = 1 комментарий пользователя: `id, date, url, post{{id, title, subsiteId, subsiteName, isOwn}},
