@@ -1,11 +1,17 @@
-<p align="center">
-  <img src="dtf_backup/assets/brand/ldtf-128.png" width="112" height="112" alt="LDTF">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.png">
+  <img width="830" height="213" src=".github/assets/banner-light.png" alt="LDTF — локальный DTF: полный офлайн-архив профиля">
+</picture>
+
+# LDTF
+
+<p>
+  <a href="https://github.com/Gwynerva/ldtf/releases/latest"><img src="https://img.shields.io/github/v/release/Gwynerva/ldtf?style=flat&label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7&colorA=0B0B0C&colorB=2A5FC8" alt="Релиз"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Gwynerva/ldtf?style=flat&label=%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F&colorA=0B0B0C&colorB=2A5FC8" alt="Лицензия"></a>
 </p>
 
-<h1 align="center">LDTF</h1>
-
-<p align="center"><b>Локальный DTF.</b> Полный офлайн-архив профиля: посты, комментарии со всего сайта с контекстом, медиа.<br>
-Смотрите в браузере, ищите, храните у себя — даже если сайт недоступен.</p>
+**Локальный DTF.** Полный офлайн-архив профиля: посты, комментарии со всего сайта с контекстом, медиа.\
+Смотрите в браузере, ищите, храните у себя — даже если сайт недоступен.
 
 ## Возможности
 
