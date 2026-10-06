@@ -1,7 +1,7 @@
 """Windows integration: start LDTF with Windows (HKCU Run key) and shortcuts with the LDTF icon.
 
 Everything here is a no-op or reports "unavailable" on other systems. A release starts with LDTF.exe (a launcher of
-runtime\pythonw.exe, tools/launcher/LDTF.cs); a folder without it (a git clone) starts pythonw.exe itself — the
+runtime/pythonw.exe, tools/launcher/LDTF.cs); a folder without it (a git clone) starts pythonw.exe itself — the
 embedded runtime's python314._pth adds the app folder to sys.path, so no working dir is needed.
 """
 

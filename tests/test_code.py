@@ -1,10 +1,12 @@
 """Static sanity of the package without third-party linters: every name a module reads is bound somewhere in it
-(a missing import on a rarely used page otherwise shows up only as a 500 for the user), and no import is unused."""
+(a missing import on a rarely used page otherwise shows up only as a 500 for the user), no import is unused, and no
+string has an invalid escape like "\\p" (a SyntaxWarning today, an error in a later Python)."""
 
 import ast
 import builtins
 import sys
 import unittest
+import warnings
 from pathlib import Path
 
 PKG = Path(__file__).resolve().parent.parent / "dtf_backup"
@@ -12,7 +14,12 @@ PKG = Path(__file__).resolve().parent.parent / "dtf_backup"
 
 def problems(path: Path) -> list[str]:
     src = path.read_text(encoding="utf-8")
-    tree = ast.parse(src)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            tree = ast.parse(src, path.name)
+    except SyntaxError as e:
+        return [f"{path.name}:{e.lineno}: {e.msg}"]
     lines = src.splitlines()
     imported: dict[str, int] = {}
     bound = set(dir(builtins)) | {"__file__", "__name__"}
