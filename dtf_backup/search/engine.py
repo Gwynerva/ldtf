@@ -14,7 +14,7 @@ Query language (all combinable)
   косп*             prefix only
 Typos ("каcплей", "косплэй"), wrong keyboard layout ("rjcgktq") and look-alike Latin letters inside Russian
 words are fixed automatically when a word is unknown to the archive; the page says what was corrected and
-offers the literal search (exact=1).
+offers the literal search (exact=1). A prefix (косп*) gets only the layout and look-alike fixes, never a guess.
 """
 
 from __future__ import annotations
@@ -281,6 +281,8 @@ class Corrector:
                 return
             if why.startswith("латинские"):
                 base = cand_w[0]       # e.g. "каcплей" -> "касплей", still a typo: fuzzy below
+        if it.prefix:                  # "пелемен*": the forms are chosen on purpose, no guessing ("перемен*")
+            return
         best = self.candidates(base, self.max_dist(base))
         if best:
             self._apply(it, best[0][2], "опечатка")
@@ -400,14 +402,25 @@ class Result:
     marker: Marker | None = None
 
 
-def search(db: sqlite3.Connection, text: str, kind: str = "", date_from: int | None = None, date_to: int | None = None,
-           sort: str = "rank", page: int = 1, per: int = 50, exact: bool = False) -> Result:
-    t0 = time.perf_counter()
+@dataclass
+class Match:
+    """The hits of a query as SQL: `FROM {Match.FROM} WHERE {where}` with `args` (search_docs is `d`). search() pages
+    through them; the MCP tool `count` groups them. `where` is empty when there is nothing to match (see res.error)."""
+    res: Result
+    where: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+    corr: Corrector | None = None
+
+    FROM = "fts JOIN search_docs d ON d.id = fts.rowid"
+
+
+def prepare(db: sqlite3.Connection, text: str, kind: str = "", date_from: int | None = None,
+            date_to: int | None = None, exact: bool = False) -> Match:
     query = parse(text)
     res = Result(query)
     if not query.clauses:
         res.error = "нужно хотя бы одно слово без минуса" if query.negs else None
-        return res
+        return Match(res)
     corr = Corrector(db)
     if not exact:
         for it in query.positive_items():
@@ -417,7 +430,7 @@ def search(db: sqlite3.Connection, text: str, kind: str = "", date_from: int | N
                 res.notes.append(f"«{' '.join(it.original or [])}» → «{it.words[0]}» ({it.note})")
     match = build_match(query)
     if not match:
-        return res
+        return Match(res, corr=corr)
     where = ["fts MATCH :m"]
     args: dict[str, Any] = {"m": match}
     if kind in ("p", "c", "o"):
@@ -429,7 +442,17 @@ def search(db: sqlite3.Connection, text: str, kind: str = "", date_from: int | N
     if date_to is not None:
         where.append("d.date < :b")
         args["b"] = date_to
-    w = " AND ".join(where)
+    return Match(res, " AND ".join(where), args, corr)
+
+
+def search(db: sqlite3.Connection, text: str, kind: str = "", date_from: int | None = None, date_to: int | None = None,
+           sort: str = "rank", page: int = 1, per: int = 50, exact: bool = False) -> Result:
+    t0 = time.perf_counter()
+    m = prepare(db, text, kind, date_from, date_to, exact)
+    res, query = m.res, m.res.query
+    if not m.where:
+        return res
+    args = dict(m.args)
     near = near_expr(query)
     close_sql = "0"
     if near and sort == "rank":
@@ -437,18 +460,39 @@ def search(db: sqlite3.Connection, text: str, kind: str = "", date_from: int | N
         args["near"] = near
     order = {"date": "d.date DESC", "old": "d.date ASC"}.get(sort, "close DESC, score")
     try:
-        res.total = db.execute(f"SELECT COUNT(*) FROM fts JOIN search_docs d ON d.id = fts.rowid WHERE {w}",
-                               {k: v for k, v in args.items() if k != "near"}).fetchone()[0]
+        res.total = db.execute(f"SELECT COUNT(*) FROM {Match.FROM} WHERE {m.where}", m.args).fetchone()[0]
         rows = db.execute(
             f"SELECT fts.rowid, d.kind, d.ref, d.entry, d.date, d.author, d.title, d.body, {BM25} "
-            f"AS score, {close_sql} AS close FROM fts JOIN search_docs d ON d.id = fts.rowid WHERE {w} "
+            f"AS score, {close_sql} AS close FROM {Match.FROM} WHERE {m.where} "
             f"ORDER BY {order} LIMIT :lim OFFSET :off", dict(args, lim=per, off=(max(page, 1) - 1) * per)).fetchall()
     except sqlite3.OperationalError as e:
         res.error = f"не удалось разобрать запрос: {e}"
         return res
     res.hits = [Hit(*r[:8], score=r[8], close=bool(r[9])) for r in rows]
-    if res.total < 5 and not exact:
-        res.suggestion = corr.suggest(query)
+    if res.total < 5 and not exact and m.corr:
+        res.suggestion = m.corr.suggest(query)
     res.marker = Marker(query)
     res.seconds = time.perf_counter() - t0
     return res
+
+
+def other_forms(db: sqlite3.Connection, query: Query, limit: int = 6) -> list[tuple[str, int]]:
+    """(term, df) of archive words that begin like a plain query word but the query does not find: diminutives and
+    other forms with a stem of their own ("пельмени" finds "пельменей", not "пельмешки"). Words with short stems
+    are skipped: "катана" would bring "катаклизм"."""
+    marker = Marker(query)
+    found: dict[str, int] = {}
+    for it in query.positive_items():
+        w = it.words[0]
+        if it.phrase or it.prefix or it.note or w in STOP or LAT_RE.search(w) or not CYR_RE.search(w):
+            continue
+        stem = query_stems(w)[-1]
+        if len(stem) < 6:
+            continue
+        lo = stem[:-1]
+        hi = lo[:-1] + chr(ord(lo[-1]) + 1)
+        for term, df in db.execute("SELECT term, df FROM vocab WHERE term >= ? AND term < ? ORDER BY df DESC LIMIT 200",
+                                   (lo, hi)):
+            if len(term) > len(lo) and not marker.hit(term):     # the bare cut stem is mostly another word
+                found[term] = max(found.get(term, 0), df)
+    return sorted(found.items(), key=lambda x: (-x[1], x[0]))[:limit]

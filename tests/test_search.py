@@ -1,12 +1,15 @@
-"""Offline unit tests of the search building blocks: stemmers, query parsing, corrections, highlighting."""
+"""Offline unit tests of the search building blocks: stemmers, query parsing, corrections, highlighting,
+and the engine over a small in-memory index."""
 
+import sqlite3
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from dtf_backup.search.engine import EN2RU, Marker, build_match, damerau, parse  # noqa: E402
+from dtf_backup.search.engine import (EN2RU, IndexWriter, Marker, build_match, damerau, other_forms, parse,  # noqa: E402
+                                     prepare, search)
 from dtf_backup.search.stemmers import en_stem, query_stems, stem_text, tokens, word_stems  # noqa: E402
 
 
@@ -75,6 +78,38 @@ class QueryTest(unittest.TestCase):
         self.assertIn("<mark>КАТАНУ</mark>", html)
         html, n = Marker(parse("кейт")).snippet("<script>кейт</script>")
         self.assertIn("&lt;script&gt;", html)
+
+
+class IndexTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.db = sqlite3.connect(":memory:")
+        w = IndexWriter(self.db)
+        for i, text in enumerate(["Сварил пельмени", "Пельмени со сметаной", "Пельмешки на ужин", "Острая катана"], 1):
+            w.add("c", i, 100, 1790000000 + i, 7, "", text)
+        w.finish()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def test_prefix_not_guessed(self) -> None:
+        res = search(self.db, "пелемен*")             # one letter off "пельмен*": taken as typed, not "fixed"
+        self.assertEqual((res.total, res.notes), (0, []))
+        res = search(self.db, "rfnfyf*")              # a keyboard layout slip is still fixed: it is no guess
+        self.assertEqual(res.total, 1)
+        self.assertIn("раскладка", res.notes[0])
+        self.assertEqual(search(self.db, "пелемени").total, 2)                 # plain words: typos fixed as before
+
+    def test_prepare(self) -> None:
+        m = prepare(self.db, "пельмени", "c")
+        self.assertEqual(self.db.execute(f"SELECT COUNT(*) FROM {m.FROM} WHERE {m.where}", m.args).fetchone()[0], 2)
+        self.assertEqual(prepare(self.db, "-пельмени").where, "")
+        self.assertTrue(prepare(self.db, "-пельмени").res.error)
+
+    def test_other_forms(self) -> None:
+        self.assertEqual(other_forms(self.db, parse("пельмени")), [("пельмешки", 1)])
+        self.assertEqual(other_forms(self.db, parse("пельмени OR пельмешки")), [])
+        self.assertEqual(other_forms(self.db, parse("пельм*")), [])                # a prefix chooses its forms itself
+        self.assertEqual(other_forms(self.db, parse("катана")), [])                # short stems: too much noise
 
 
 if __name__ == "__main__":

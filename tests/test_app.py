@@ -45,42 +45,43 @@ def comment(cid: int, parent: int, level: int, uid: int, name: str, date: int, t
             "replyCount": 0, "entry": {"id": entry, "title": title, "subsiteId": 1, "subsiteName": "Сабсайт"}}
 
 
-def make_archive(library: Path, nick: str = "tester") -> Archive:
+def make_archive(library: Path, nick: str = "tester", *, uid: int = UID, post: int = OWN_POST,
+                 foreign: int = FOREIGN) -> Archive:
     root = library / nick
     t = 1790000000  # 2026-09
-    gz(root / "raw" / "profile.json.gz", {"id": UID, "name": "Тестер", "nickname": nick, "uri": f"/{nick}",
+    gz(root / "raw" / "profile.json.gz", {"id": uid, "name": "Тестер", "nickname": nick, "uri": f"/{nick}",
                                            "url": f"https://dtf.ru/{nick}", "created": 1600000000,
                                            "avatar": {"type": "image", "data": {"uuid": IMG}}})
     gz(root / "raw" / "assets.json.gz", {"reactions": [{"id": 1, "type": "free", "staticUuid": IMG}], "badges": []})
-    gz(root / "raw" / "posts" / f"{OWN_POST}.json.gz", {
-        "id": OWN_POST, "date": t, "title": "Мой пост про катану", "url": f"https://dtf.ru/{nick}/{OWN_POST}-katana",
+    gz(root / "raw" / "posts" / f"{post}.json.gz", {
+        "id": post, "date": t, "title": "Мой пост про катану", "url": f"https://dtf.ru/{nick}/{post}-katana",
         "counters": {"comments": 2}, "reactions": {"counters": [{"id": 1, "count": 3}]},
         "donations": {"amount": 100, "isDonated": False},
         "blocks": [{"type": "text", "data": {"text": "<p>Текст про <b>катану</b></p>"}},
                    {"type": "media", "data": {"items": [{"image": {"type": "image", "data": {"uuid": IMG, "type": "jpg"}}},
                                                         {"image": {"type": "image", "data": {"uuid": IMG, "type": "jpg"}}}]}},
                    {"type": "futureBlock", "data": {"x": 1}}]})
-    gz(root / "raw" / "post-trees" / f"{OWN_POST}.json.gz", {"items": [
-        dict(comment(11, 0, 0, 42, "Гость", t + 10, "Первый!", OWN_POST), donation=300),
-        dict(comment(12, 11, 1, UID, "Тестер", t + 20, "Спасибо", OWN_POST), donations={"amount": 50}),
-        dict(comment(13, 0, 0, 44, "Молчун", t + 15, "", OWN_POST), donation=150)]})
+    gz(root / "raw" / "post-trees" / f"{post}.json.gz", {"items": [
+        dict(comment(11, 0, 0, 42, "Гость", t + 10, "Первый!", post), donation=300),
+        dict(comment(12, 11, 1, uid, "Тестер", t + 20, "Спасибо", post), donations={"amount": 50}),
+        dict(comment(13, 0, 0, 44, "Молчун", t + 15, "", post), donation=150)]})
     # the user's feed: one comment under the own post, a dialog of two replies in a foreign thread
-    feed = [comment(12, 11, 1, UID, "Тестер", t + 20, "Спасибо", OWN_POST, "Мой пост про катану"),
-            comment(22, 21, 1, UID, "Тестер", t + 30, "> цитата\nОтвет", FOREIGN, "Чужой пост"),
-            comment(24, 23, 3, UID, "Тестер", t + 50, "Ещё ответ", FOREIGN, "Чужой пост")]
+    feed = [comment(12, 11, 1, uid, "Тестер", t + 20, "Спасибо", post, "Мой пост про катану"),
+            comment(22, 21, 1, uid, "Тестер", t + 30, "> цитата\nОтвет", foreign, "Чужой пост"),
+            comment(24, 23, 3, uid, "Тестер", t + 50, "Ещё ответ", foreign, "Чужой пост")]
     gz(root / "raw" / "my-comments" / "2026.jsonl.gz", feed, lines=True)
-    gz(root / "raw" / "threads" / f"{FOREIGN}.json.gz", {"entryId": FOREIGN, "items": [
-        comment(21, 0, 0, 43, "Другой", t + 25, "Корень ветки: косплей и ещё раз о косплее", FOREIGN),
-        comment(22, 21, 1, UID, "Тестер", t + 30, "> цитата\nОтвет", FOREIGN),
-        comment(23, 22, 2, 43, "Другой", t + 40, "Возражение: катаной так не рубят", FOREIGN),
-        comment(24, 23, 3, UID, "Тестер", t + 50, "Ещё ответ", FOREIGN)]})
+    gz(root / "raw" / "threads" / f"{foreign}.json.gz", {"entryId": foreign, "items": [
+        comment(21, 0, 0, 43, "Другой", t + 25, "Корень ветки: косплей и ещё раз о косплее", foreign),
+        comment(22, 21, 1, uid, "Тестер", t + 30, "> цитата\nОтвет", foreign),
+        comment(23, 22, 2, 43, "Другой", t + 40, "Возражение: катаной так не рубят", foreign),
+        comment(24, 23, 3, uid, "Тестер", t + 50, "Ещё ответ", foreign)]})
     arch = Archive(root, library)
-    arch.set_meta("user_id", UID)
+    arch.set_meta("user_id", uid)
     # the latest listing: fresher counters, reactions and donations than the post's download
     arch.db.execute("INSERT INTO posts(id, date, stats, stats_at) VALUES (?,?,?,?)",
-                    (OWN_POST, t, json.dumps({"counters": {"comments": 3}, "reactions": {"counters": [{"id": 1, "count": 4}]},
-                                              "donations": {"amount": 500}}), t + 100))
-    arch.queue_media([(IMG, None, "jpg")], f"post:{OWN_POST}")
+                    (post, t, json.dumps({"counters": {"comments": 3}, "reactions": {"counters": [{"id": 1, "count": 4}]},
+                                          "donations": {"amount": 500}}), t + 100))
+    arch.queue_media([(IMG, None, "jpg")], f"post:{post}")
     arch.commit()
     # the file itself in the shared store
     content = b"\xff\xd8JPEG" + b"x" * 5000
