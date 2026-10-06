@@ -1,14 +1,17 @@
-"""Local HTTP server of LDTF (stdlib ThreadingHTTPServer, bound to 127.0.0.1 only).
+"""HTTP server of LDTF (stdlib ThreadingHTTPServer): 127.0.0.1 by default, any address with `serve --host`.
 
-Security: requests must carry a local Host header (no DNS rebinding); every form POST needs the CSRF token of the
-library (kept in archive/.state/app.secret, so a page opened before a restart still works) and, when present, a local
-Origin (other sites in the browser can't trigger actions). The JSON job API used
-by the CLI (`dtf-backup sync` while the app runs) needs the per-run token from archive/.state/app.run.json.
+Security on this computer (127.0.0.1): requests must carry a local Host header (no DNS rebinding); every form POST
+needs the CSRF token of the library (kept in archive/.state/app.secret, so a page opened before a restart still works)
+and, when present, a local Origin (other sites in the browser can't trigger actions). The JSON job API used by the CLI
+(`dtf-backup sync` while the app runs) needs the per-run token from archive/.state/app.run.json.
+Beyond this computer (`--host 0.0.0.0`, Docker): any Host, a POST must come from the page's own origin, and every
+page needs the password (web/auth.py) unless LDTF_AUTH=off says a reverse proxy checks who comes in.
 """
 
 from __future__ import annotations
 
 import gzip
+import hashlib
 import html
 import http.cookies
 import json
@@ -16,6 +19,7 @@ import mimetypes
 import os
 import re
 import secrets
+import signal
 import socket
 import sys
 import threading
@@ -27,18 +31,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .. import DEFAULT_PORT, __version__
+from .. import DEFAULT_PORT, __version__, config
 from ..appsettings import load_app_settings, save_app_settings
 from ..media import avatar_key, lookup
 from ..netpool import NetPool
 from ..normalize import MediaResolver
-from ..reactions import CONFIG_NAME
+from ..reactions import config_path
 from ..scheduler import Scheduler, next_sync
 from ..scope import comments_kept, pending_drop
 from ..state import META_GUARD, Archive, archive_dirs, gc_pending, peek_meta
 from ..util import atomic_write_text, log, read_json_gz, write_json
 from ..viewdb import open_view, view_meta, view_outdated, view_ready
-from . import app_pages, viewer
+from . import app_pages, insights, viewer
 from .jobs import KINDS, RUNNING, JobManager
 from .ui import ASSETS, Links, Shell, avatar_src, btn, empty_state
 
@@ -51,11 +55,19 @@ NICK_RE = re.compile(r"^[\w.\-]{1,64}$")
 FLASH = "<!--flash-->"   # where a page shows the outcome of the form that led to it (App.flash)
 
 
+def library_id(library: Path) -> str:
+    """Which library a running LDTF serves (/api/ping): another copy of LDTF on the default port is not this one."""
+    return hashlib.sha256(os.path.normcase(str(library.resolve())).encode("utf-8")).hexdigest()[:16]
+
+
 class App:
-    def __init__(self, library: Path, port: int):
+    def __init__(self, library: Path, port: int, host: str = "127.0.0.1"):
         self.library = library.resolve()
         self.library.mkdir(parents=True, exist_ok=True)
         self.port = port
+        self.host = host
+        self.remote = not config.is_loopback(host)   # reachable beyond this computer: Host is not checked
+        self.library_id = library_id(self.library)
         self.csrf = form_secret(self.library)
         self.shell = Shell(self.csrf)
         self.lock = threading.Lock()
@@ -74,6 +86,7 @@ class App:
         self.scheduler = Scheduler(self)
         self.finish_listeners: list[Any] = []   # the tray shows notifications
         self.on_quit: Any = None                 # set by the runner (tray / console)
+        self._rebuild_timer: threading.Timer | None = None
 
     # ------------------------------------------------------------------ app settings, status
     def settings(self) -> dict:
@@ -167,7 +180,7 @@ class App:
         arch = self.archive(nick)
         if arch is None or not view_ready(arch):
             return None
-        cfg = arch.root / CONFIG_NAME
+        cfg = config_path(self.library)
         stamp = tuple(p.stat().st_mtime if p.exists() else 0 for p in (arch.view_path, cfg, arch.settings_path))
         with self.lock:
             hit = self._views.get(nick)
@@ -183,6 +196,20 @@ class App:
         """Cached pages of one archive (under self.lock)."""
         for k in [k for k in self._pages if k[0] == nick]:
             del self._pages[k]
+
+    def rebuild_all_soon(self, delay: float = 5.0) -> None:
+        """Rebuild data/ and md/ of every built archive once changes stop for `delay` seconds (the dislike list:
+        pages apply it at once, the files for agents need a build). A build already running gets one more after it."""
+        def go() -> None:
+            for d in archive_dirs(self.library):
+                if view_ready(Archive(d, self.library)):
+                    self.jobs.submit(d.name, "render", reason="reactions", after_running=True)
+        with self.lock:
+            if self._rebuild_timer is not None:
+                self._rebuild_timer.cancel()
+            self._rebuild_timer = threading.Timer(delay, go)
+            self._rebuild_timer.daemon = True
+            self._rebuild_timer.start()
 
     def invalidate(self, nick: str | None = None) -> None:
         with self.lock:
@@ -232,9 +259,28 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     # ------------------------------------------------------------------ helpers
+    def _host_name(self) -> str:
+        try:
+            return (urllib.parse.urlsplit("//" + (self.headers.get("Host") or "")).hostname or "").lower()
+        except ValueError:
+            return ""
+
     def _local_host(self) -> bool:
-        host = (self.headers.get("Host") or "").split(":")[0].strip("[]").lower()
-        return host in ("127.0.0.1", "localhost", "::1")
+        """On this computer only a local Host is served (DNS rebinding); beyond it the address can be anything."""
+        return self.app.remote or self._host_name() in config.LOOPBACK
+
+    def _same_origin(self) -> bool:
+        """Other sites in the browser can't trigger actions: Origin, when sent, is this server."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        try:
+            host = urllib.parse.urlsplit(origin).hostname
+        except ValueError:
+            return False
+        if self.app.remote:
+            return bool(host) and host.lower() == self._host_name()
+        return host in config.LOOPBACK
 
     def send_body(self, code: int, body: bytes, ctype: str, headers: dict | None = None, gz: bool = False) -> None:
         if gz and len(body) > 8192 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
@@ -373,7 +419,8 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/media/"):
                 return self.static(self.app.library / "media", path[len("/media/"):], immutable=True)
             if path == "/api/ping":
-                return self.json({"app": "ldtf", "version": __version__, "pid": os.getpid()})
+                return self.json({"app": "ldtf", "version": __version__, "pid": os.getpid(),
+                                  "library": self.app.library_id})
             if path == "/api/jobs":
                 return self.json([j.snapshot() for j in self.app.jobs.active()])
             m = re.fullmatch(r"/api/jobs/(\d+)", path)
@@ -406,6 +453,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.html(app_pages.diagnostics_page(self.app))
             if path == "/app":
                 return self.html(app_pages.app_settings_page(self.app))
+            if path == "/app/reactions":
+                return self.html(app_pages.app_reactions_page(self.app))
             m = re.fullmatch(r"/u/([^/]+)(/.*)?", path)
             if m:
                 return self.archive_get(urllib.parse.unquote(m.group(1)), m.group(2) or "/", qs, q)
@@ -428,6 +477,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.html(app_pages.sync_page(app, nick), headers=cookie)
         if sub == "/settings":
             return self.html(app_pages.settings_page(app, nick), headers=cookie)
+        if sub == "/reactions":   # LDTF 1.3 kept a dislike list per archive: now one for all, in the app settings
+            return self.redirect("/app/reactions", 302)
         v = app.view(nick)
         if v is None:  # first sync still running / never built
             return self.redirect(Links(nick).sync(), 302)
@@ -449,6 +500,8 @@ class Handler(BaseHTTPRequestHandler):
                 res, active, wide = viewer.page_posts(v), "posts", True
             elif sub == "/comments":
                 res, active, wide = viewer.page_calendar(v), "comments", True
+            elif sub == "/donations":
+                res, active = insights.page_donations(v), "index"
             elif sub == "/search":
                 page = int(qs("page", "1") or 1) if qs("page", "1").isdigit() else 1
                 gs = q.get("g") or ["1"]  # checkbox + hidden fallback: "1" when checked
@@ -456,8 +509,6 @@ class Handler(BaseHTTPRequestHandler):
                                                  exact=qs("exact") == "1", group="1" in gs,
                                                  rebuild=lambda action: app.shell.form(action, btn("Пересобрать", "text",
                                                                                                    "restart_alt"))), "search"
-            elif sub == "/reactions":
-                res, active = viewer.page_reactions(v, lambda action, inner: app.shell.form(action, inner, autosave=True)), "reactions"
             else:
                 mm = re.fullmatch(r"/p/(\d+)", sub)
                 if mm:
@@ -481,8 +532,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._local_host():
             return self.send_body(403, b"forbidden", "text/plain")
-        origin = self.headers.get("Origin")
-        if origin and urllib.parse.urlsplit(origin).hostname not in ("127.0.0.1", "localhost", "::1"):
+        if not self._same_origin():
             return self.send_body(403, "запрос с чужого сайта отклонён".encode(), "text/plain; charset=utf-8")
         if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
             return self.api_post()
@@ -537,11 +587,11 @@ class Handler(BaseHTTPRequestHandler):
         return self.json({"error": "нет такого метода"}, 404)
 
 
-def _free_port(start: int) -> int:
+def _free_port(start: int, host: str = "127.0.0.1") -> int:
     for p in range(start, start + 50):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("127.0.0.1", p))
+                s.bind((host, p))
                 return p
             except OSError:
                 continue
@@ -580,21 +630,37 @@ def run_file(library: Path) -> Path:
 
 
 def find_running(library: Path, port: int = DEFAULT_PORT) -> dict | None:
-    """A LDTF already serving this library: {"url", "port", "token"?}; checks the run file, then the default port."""
+    """A LDTF already serving this library: {"url", "port", "token"?}; checks the run file, then the default port.
+    Another library's LDTF on that port (another copy of the app, a test) is not this one."""
+    lib = library_id(library)
     rf = run_file(library.resolve())
     try:
         info = json.loads(rf.read_text(encoding="utf-8"))
-        if _ping(int(info["port"])):
+        ping = _ping(int(info["port"]))
+        if ping and ping.get("library", lib) == lib:   # LDTF before 1.4 doesn't say: its run file is enough
             return {**info, "url": f"http://127.0.0.1:{int(info['port'])}/"}
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    if _ping(port):
+    ping = _ping(port)
+    if ping and ping.get("library") == lib:
         return {"port": port, "url": f"http://127.0.0.1:{port}/"}
     return None
 
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    # on Windows SO_REUSEADDR lets a second server take a port that is in use: the port must be ours alone
+    allow_reuse_address = os.name != "nt"
+
+    def __init__(self, addr: tuple, handler: Any):
+        if ":" in addr[0]:
+            self.address_family = socket.AF_INET6
+        super().__init__(addr, handler)
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         """A request the browser dropped (a lazy picture scrolled away, a closed tab) is not an error of the app."""
@@ -604,15 +670,18 @@ class Server(ThreadingHTTPServer):
 
 
 class Runtime:
-    """The running app: HTTP server thread + scheduler; `stop()` shuts everything down gracefully."""
+    """The running app: HTTP server thread + scheduler; `stop()` shuts everything down gracefully.
+    `port`: None takes DEFAULT_PORT or the next free one; a port given explicitly is used as is (Docker, servers)."""
 
-    def __init__(self, library: Path, port: int = DEFAULT_PORT, scheduler_delay: float = 10.0):
-        self.port = _free_port(port)
-        self.app = App(library, self.port)
+    def __init__(self, library: Path, port: int | None = None, scheduler_delay: float = 10.0,
+                 host: str = "127.0.0.1"):
+        self.port = port if port else _free_port(DEFAULT_PORT, host)
+        self.app = App(library, self.port, host)
         self.app.scheduler.first_delay = scheduler_delay
         Handler.app = self.app
-        self.httpd = Server(("127.0.0.1", self.port), Handler)
-        self.url = f"http://127.0.0.1:{self.port}/"
+        self.httpd = Server((host, self.port), Handler)
+        shown = "127.0.0.1" if host in ("0.0.0.0", "::", "") else (f"[{host}]" if ":" in host else host)
+        self.url = f"http://{shown}:{self.port}/"
         self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.5},
                                        name="http", daemon=True)
         self.stopped = threading.Event()
@@ -625,13 +694,6 @@ class Runtime:
             self.app.scheduler.start()
         write_json(run_file(self.app.library), {"pid": os.getpid(), "port": self.port, "token": self.app.token,
                                                 "version": __version__, "started": int(time.time())})
-        try:
-            from .. import winintegration as win
-            if win.available():
-                win.refresh_autostart()
-                log.info(f"[автозапуск] {win.STATE_TITLES[win.autostart_state()]}")
-        except Exception as e:  # noqa: BLE001 - a stale autostart entry must not stop the app
-            log.warning(f"[app] не удалось обновить автозапуск: {e}")
         self._catch_up()
         log.info(f"LDTF {__version__} работает: {self.url} (архивы: {self.app.library})")
         return self
@@ -687,25 +749,66 @@ def _clean_media_tmp(library: Path) -> None:
             pass
 
 
-def serve(library: Path, port: int = DEFAULT_PORT, open_browser: bool = False, auto_sync: bool = True) -> None:
-    """Console mode: the server runs until Ctrl+C / the window is closed / "Остановить LDTF" in the app."""
-    running = find_running(library, port)
+def port_problem(host: str, port: int | None, e: OSError) -> str:
+    if port:
+        return (f"Не удалось занять {host}:{port} ({e}). Порт занят другой программой или другой копией LDTF — "
+                f"укажите другой: --port или LDTF_PORT.")
+    return f"Не удалось запустить сервер на {host}: {e}"
+
+
+def check_writable(library: Path) -> str | None:
+    """Why LDTF can't keep its archives in this folder (a Docker volume made by root, a read-only disk), or None."""
+    probe = library / ".state" / ".write-test"
+    try:
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return None
+    except OSError as e:
+        hint = ""
+        if os.name != "nt" and hasattr(os, "getuid"):
+            hint = (f" Дайте пользователю {os.getuid()}:{os.getgid()} права на папку, например: "
+                    f"sudo chown -R {os.getuid()}:{os.getgid()} <папка с данными на сервере>")
+        return f"Нет записи в папку архивов {library}: {e}.{hint}"
+
+
+def serve(library: Path, port: int | None = None, open_browser: bool = False, auto_sync: bool = True,
+          host: str = "127.0.0.1") -> int:
+    """Console mode: the server runs until Ctrl+C / SIGTERM (docker stop) / "Остановить LDTF" in the app."""
+    running = find_running(library, port or DEFAULT_PORT)
     if running:
         print(f"LDTF уже запущен: {running['url']}")
         if open_browser:
             webbrowser.open(running["url"])
-        return
-    rt = Runtime(library, port, scheduler_delay=10.0).start(scheduler=auto_sync)
-    rt.app.on_quit = lambda: threading.Thread(target=rt.stop, daemon=True).start()
-    print(f"LDTF {__version__} работает: {rt.url}")
-    print(f"Архивы: {rt.app.library}")
-    print("Закройте это окно (или Ctrl+C), чтобы остановить приложение.")
+        return 0
+    problem = check_writable(library)
+    if problem:
+        log.error(problem)
+        return 1
+    try:
+        rt = Runtime(library, port, scheduler_delay=10.0, host=host).start(scheduler=auto_sync)
+    except OSError as e:
+        log.error(port_problem(host, port, e))
+        return 1
+    quit_ = threading.Event()
+    rt.app.on_quit = quit_.set
+    if hasattr(signal, "SIGTERM"):
+        try:
+            signal.signal(signal.SIGTERM, lambda *_: quit_.set())
+        except ValueError:   # not the main thread (tests)
+            pass
+    log.info(f"Архивы: {rt.app.library}")
+    if rt.app.remote:
+        log.info("Сервер доступен и по адресу этого компьютера в сети.")
+    if sys.stdin is not None and sys.stdin.isatty():
+        print("Закройте это окно (или Ctrl+C), чтобы остановить приложение.")
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(rt.url)).start()
     try:
-        while not rt.stopped.wait(0.5):
+        while not quit_.wait(0.5):
             pass
     except KeyboardInterrupt:
-        print("Останавливаю…")
-        rt.stop()
-    print("Остановлено.")
+        pass
+    log.info("Останавливаю…")
+    rt.stop()
+    return 0

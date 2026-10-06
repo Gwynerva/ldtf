@@ -20,18 +20,17 @@ from ..guard import hint as guard_hint, title as guard_title
 from ..http import FatalNetworkError
 from ..media import MEDIA_MODE_TITLES, avatar_key, effective_media
 from ..normalize import EXT_LINK
-from ..reactions import CONFIG_NAME, load_config
+from ..reactions import Reactions, load_config, save_negative
 from ..scheduler import human_when
 from ..scope import SCOPE_TITLES, comment_footprint, comments_kept, describe, has_comment_data
-from ..settings import CHOICES, DEFAULTS, LIMITS, SAVE_LOCK, clean_settings, log_changes, save_settings
+from ..settings import CHOICES, DEFAULTS, LIMITS, clean_settings, log_changes, save_settings
 from ..state import META_GUARD, META_LAST_SYNC, Archive, read_meta
 from ..sync import status as status_text
-from ..util import (COMMENTS, FILES, POSTS, count_label, human_bytes, log, num, plural, short, ts_date, ts_human,
-                    write_json)
+from ..util import COMMENTS, FILES, POSTS, count_label, human_bytes, log, num, plural, short, ts_date, ts_human
 from .icons import icon
 from .jobs import ACTIVE, CANCELLED, ERROR, JOB_STATES, QUEUED, RUNNING_TITLES, STATE_ICONS
-from .ui import (Links, archive_link, avatar, badge, banner, btn, empty_state, fold, hidden_input, icon_btn, manage_tabs,
-                 menu, menu_item, page_head, sec_head, snackbar, stat)
+from .ui import (Links, app_tabs, archive_link, avatar, badge, banner, btn, empty_state, fold, hidden_input, icon_btn,
+                 manage_tabs, menu, menu_item, page_head, sec_head, snackbar, stat)
 
 if TYPE_CHECKING:
     from .server import App, Handler
@@ -64,7 +63,7 @@ def archives_page(app: "App", notice: str = FLASH) -> str:
         href, sub = archive_link(a)
         sync = app.shell.form(L.action("sync/start"), icon_btn("sync", "Синхронизировать", submit=True))
         more = menu("more_vert", "Ещё", menu_item("Синхронизация", "history", L.sync()) +
-                    menu_item("Настройки", "tune", L.settings()) + menu_item("Реакции", "add_reaction", L.reactions()))
+                    menu_item("Настройки", "tune", L.settings()))
         rows.append(f'<div class="li acc">{avatar(a.get("avatar"))}<div class="li-body">'
                     f'<a class="li-link li-t" href="{E(href)}">{E(a["name"])}</a>'
                     f'<span class="li-s">@{E(a["nick"])}</span><span class="li-s">{sub}</span>{when}</div>'
@@ -451,8 +450,32 @@ def app_settings_page(app: "App", notice: str = FLASH) -> str:
                    app.shell.form("/app/quit", btn("Остановить", "danger tonal sm", "power_settings_new"),
                                   confirm="Остановить LDTF?"))
              + "</section>")
-    body = page_head("Настройки приложения") + notice + form + about
+    body = page_head("Настройки приложения") + app_tabs("app") + notice + form + about
     return app.page("Настройки приложения", body, active="app")
+
+
+def app_reactions_page(app: "App", notice: str = FLASH) -> str:
+    """Which reactions count as dislikes ▼ — one list for every archive (reactions are the same for all posts on DTF)."""
+    from ..normalize import MediaResolver
+    rx = Reactions.for_library(app.library, MediaResolver.for_library(app.library), None)
+    cells = []
+    for row in rx.catalog():
+        img = rx.img(row["id"], "/") or '<span class="rx-q">?</span>'
+        neg = row["polarity"] == "negative"
+        cells.append(f'<label class="rx-cell" title="Реакция #{row["id"]}"><input type="checkbox" name="neg" '
+                     f'value="{E(str(row["id"]))}"{" checked" if neg else ""}>{img}<span>{E(row["label"] or "")}</span>'
+                     f'{"<span class=rx-old>больше нет на сайте</span>" if row["retired"] else ""}'
+                     f'<span class="rx-ck">{icon("check_circle", fill=True)}</span></label>')
+    if cells:
+        inner = (f'<p class="muted small rx-note">DTF считает любую реакцию как +1. Отметьте те, что LDTF считает '
+                 f'дизлайками ▼, — рейтинги пересчитаются во всех архивах. Выбор сохраняется сразу.</p>'
+                 f'<div class="rx-grid">{"".join(cells)}</div>')
+        content = app.shell.form("/app/reactions", inner, autosave=True)
+    else:
+        content = empty_state("add_reaction", "Реакций пока нет",
+                              "Каталог реакций появится после первой синхронизации любого архива.")
+    body = page_head("Настройки приложения") + app_tabs("reactions") + notice + content
+    return app.page("Реакции", body, active="reactions")
 
 
 # ---------------------------------------------------------------------- diagnostics
@@ -581,8 +604,21 @@ def post_diagnostics(h: "Handler", app: "App", f: dict, val: Callable[..., str])
     return h.redirect("/diagnostics")
 
 
+def post_reactions(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
+    """The reactions counted as dislikes, for every archive: the whole set comes with every change (app.js adds an empty
+    value, so "none" still sends the field). Pages switch at once; data/ and md/ of the archives are rebuilt in the
+    background a few seconds after the last change."""
+    old = load_config(app.library)["negative"]
+    neg = save_negative(app.library, [x for x in f.get("neg", []) if x.strip()])
+    log_changes("приложение", {"дизлайки": old}, {"дизлайки": neg})
+    app.invalidate()
+    app.rebuild_all_soon()
+    return saved(h, "/app/reactions", "Сохранено — рейтинги пересчитаны, data/ и md/ обновятся в фоне",
+                 values={"neg": [str(x) for x in neg]})
+
+
 APP_ACTIONS = {"/add": post_add, "/app": post_app_settings, "/app/shortcut": post_shortcut, "/app/quit": post_quit,
-               "/diagnostics": post_diagnostics}
+               "/app/reactions": post_reactions, "/diagnostics": post_diagnostics}
 
 
 # ------------------------------------------------ archive actions (/u/<nick>/<action>): handler(h, app, arch, fields, val)
@@ -659,27 +695,6 @@ def post_settings(h: "Handler", app: "App", arch: Archive, f: dict, val: Callabl
     return saved(h, L.settings(), "Сохранено", values=form_view(s), regions=regions, flash=flash)
 
 
-def post_reactions(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[..., str]) -> None:
-    """The reactions counted as dislikes: the whole set comes with every change (app.js adds an empty value, so
-    "none" still sends the field)."""
-    neg: list[Any] = []
-    for x in f.get("neg", []):
-        if not x.strip():
-            continue
-        try:
-            neg.append(int(x))
-        except ValueError:
-            neg.append(x)
-    with SAVE_LOCK:
-        cfg = load_config(arch.root)
-        old = cfg.get("negative")
-        cfg["negative"] = neg
-        write_json(arch.root / CONFIG_NAME, cfg)
-    log_changes(f"@{arch.nick}", {"дизлайки": old}, {"дизлайки": neg})
-    app.invalidate(arch.nick)
-    return saved(h, Links(arch.nick).reactions(), "Сохранено — рейтинги пересчитаны", values={"neg": [str(x) for x in neg]})
-
-
 def post_delete(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[..., str]) -> None:
     nick = arch.nick
     if val("confirm") != nick:
@@ -705,7 +720,7 @@ def post_delete(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[
 
 
 ARCHIVE_ACTIONS = {"sync/start": post_sync_start, "sync/stop": post_sync_stop, "render": post_render, "guard": post_guard,
-                   "settings": post_settings, "reactions": post_reactions, "delete": post_delete}
+                   "settings": post_settings, "delete": post_delete}
 ARCHIVE_ACTION_RE = re.compile(r"/u/([^/]+)/(" + "|".join(map(re.escape, ARCHIVE_ACTIONS)) + ")")
 
 

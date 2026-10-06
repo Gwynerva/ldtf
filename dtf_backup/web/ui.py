@@ -16,7 +16,7 @@ from ..guard import state_title, title
 from ..media import avatar_key
 from ..normalize import EXT_LINK, Linker, MediaResolver, comment_text, media_info
 from ..reactions import Reactions
-from ..util import COMMENTS, POSTS, count_label, num, plural, ts_human
+from ..util import COMMENTS, POSTS, count_label, num, plural, rub, ts_human
 from .icons import icon
 
 E = html.escape
@@ -55,7 +55,7 @@ class Links:
     def month(self, ym: str, page: int = 1) -> str: return f"{self.base}/c/{ym}" + (f"?page={page}" if page > 1 else "")
     def go(self, cid: int) -> str: return f"{self.base}/go/c/{int(cid)}"
     def search(self) -> str: return self.base + "/search"
-    def reactions(self) -> str: return self.base + "/reactions"
+    def donations(self) -> str: return self.base + "/donations"
     def sync(self) -> str: return self.base + "/sync"
     def settings(self) -> str: return self.base + "/settings"
     def action(self, name: str) -> str: return f"{self.base}/{name}"   # POST: sync/start, sync/stop, render, guard, delete
@@ -155,9 +155,18 @@ def tabs(items: list[tuple[str, str, str, str]], active: str) -> str:
 
 
 def manage_tabs(links: "Links", active: str) -> str:
-    """Tabs shared by the archive management pages (sync / settings / reactions)."""
-    return tabs([(links.sync(), "Синхронизация", "sync", "sync"), (links.settings(), "Настройки", "tune", "settings"),
-                 (links.reactions(), "Реакции", "add_reaction", "reactions")], active)
+    """Tabs shared by the archive management pages (sync / settings)."""
+    return tabs([(links.sync(), "Синхронизация", "sync", "sync"), (links.settings(), "Настройки", "tune", "settings")],
+                active)
+
+
+APP_TABS = [("/app", "Основные", "settings", "app"), ("/app/reactions", "Реакции", "add_reaction", "reactions")]
+APP_PAGES = {k for _, _, _, k in APP_TABS} | {"diagnostics"}   # the account menu marks "Настройки приложения" on them
+
+
+def app_tabs(active: str) -> str:
+    """Tabs of the app settings (they apply to every archive)."""
+    return tabs(APP_TABS, active)
 
 
 def pagination(cur: int, total: int, link: Callable[[int], str], compact: bool = False) -> str:
@@ -263,7 +272,7 @@ PAGE_TEMPLATES = ('<template id="icons">' + "".join(f'<i data-n="{n}">{icon(n)}<
                   f'<template id="mstub">{media_stub("image")}</template>')
 NAV = [("home", "index", "Главная", "home"), ("posts", "posts", "Посты", "article"),
        ("comments", "comments", "Комментарии", "forum"), ("search", "search", "Поиск", "search")]
-MANAGE = {"sync", "settings", "reactions"}
+MANAGE = {"sync", "settings"}
 
 
 class Shell:
@@ -292,7 +301,7 @@ class Shell:
             items.append('<hr class="menu-div">')
         items.append(menu_item("Добавить пользователя", "person_add", "/add", on=active == "add"))
         items.append(menu_item("Все архивы", "inventory_2", "/archives", on=active == "archives"))
-        items.append(menu_item("Настройки приложения", "settings", "/app", on=active in ("app", "diagnostics")))
+        items.append(menu_item("Настройки приложения", "settings", "/app", on=active in APP_PAGES))
         acct = (f'<details class="acct"><summary title="Сменить архив" aria-label="Сменить архив">{who}'
                 f'<span class="acct-name">{label}</span>{icon("unfold_more")}</summary>'
                 f'<div class="menu-pop acct-menu" role="menu">{"".join(items)}</div></details>')
@@ -439,6 +448,9 @@ class CommentView:
         elif c.get("likes"):
             badges.append(f'<span class="score" title="Рейтинг DTF"><span class="pos">▲ {c["likes"]}</span></span>')
         rx_h = self.rx.html(c["rx"], self.R, f"comment {c['id']}") if c.get("rx") and self.rx else ""
+        if c.get("donation"):
+            badges.append(f'<span class="badge don" title="Донат автору поста вместе с комментарием">'
+                          f'{icon("volunteer_activism")}Донат {rub(c["donation"])}</span>')
         if c.get("isEdited"):
             badges.append(f'<span class="c-ed" title="Отредактирован">{icon("edit")}</span>')
         if c.get("site"):
@@ -455,11 +467,18 @@ class CommentView:
             removed = " removed"
         media_h = self.media_parts(c)[0] if c.get("media") else ""
         idattr = f' id="c{c["id"]}"' if anchor else ""
-        return (f'<div class="c{" mine" if mine else ""}{removed}{" " + cls if cls else ""}"{idattr} data-id="{c["id"]}">'
+        if c.get("donation") and not (c.get("text") or "").strip() and not media_h:
+            text, removed = "", removed + " c-don-only"   # a donation without words: the badge says it all
+        foot = rx_h
+        if c.get("donated"):
+            foot = (f'<span class="rx don" title="Донаты этому комментарию">{icon("volunteer_activism")}'
+                    f'+{rub(c["donated"])}</span>') + foot
+        don = " c-don" if c.get("donation") else ""
+        return (f'<div class="c{" mine" if mine else ""}{don}{removed}{" " + cls if cls else ""}"{idattr} data-id="{c["id"]}">'
                 f'<div class="c-h"><span class="ca">{self.avatar_html(c.get("author"))}{name}</span>{date_link}'
-                f'{"".join(badges)}{tog}</div><div class="c-t">{text}</div>'
+                f'{"".join(badges)}{tog}</div>{f"<div class=c-t>{text}</div>" if text else ""}'
                 f'{f"<div class=\"c-m pswp-gallery\">{media_h}</div>" if media_h else ""}'
-                f'{f"<div class=c-f>{rx_h}</div>" if rx_h else ""}</div>')
+                f'{f"<div class=c-f>{foot}</div>" if foot else ""}</div>')
 
     def tree(self, roots: list[int], by_id: dict[int, dict], children: dict[int, list[int]],
              post_id: int | None, anchors: bool) -> str:

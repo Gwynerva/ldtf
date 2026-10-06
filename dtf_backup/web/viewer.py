@@ -19,11 +19,12 @@ from ..reactions import Reactions
 from ..scope import comments_kept
 from ..search.engine import has_index, search
 from ..state import Archive, unpack
-from ..util import COMMENTS, MSK, POSTS, count_label, human_bytes, num, plural, ts_date, ts_human
+from ..util import COMMENTS, MSK, POSTS, count_label, human_bytes, num, plural, rub, ts_date, ts_human
 from ..viewdb import group_view, open_view, view_meta
 from .icons import icon
+from .insights import donations_total
 from .ui import (MONTHS_SHORT, CommentView, Links, badge, banner, btn, empty_state, fold, icon_btn,
-                 manage_tabs, mi, month_title, page_head, pager, pagination, sec_head, stat)
+                 mi, month_title, page_head, pager, pagination, sec_head, stat)
 
 E = html.escape
 
@@ -84,11 +85,13 @@ def post_card(v: ArchiveView, row: sqlite3.Row) -> str:
     if site:
         rep += badge(state_title(site), "history", "site pc-site")
     lead = f'<div class="pc-l">{E(row["lead"])}</div>' if row["lead"] else ""
+    don = row["donations"] or 0
+    don_h = f'<span class="mi don" title="Донаты">{icon("volunteer_activism")}{rub(don)}</span>' if don else ""
     return (f'<a class="pcard card" href="{E(v.links.post(row["id"]))}" data-date="{row["date"]}" '
-            f'data-comments="{row["comments"]}" data-reactions="{pos}">'
+            f'data-comments="{row["comments"]}" data-reactions="{pos}" data-donations="{don}">'
             f'<div class="pc-img">{img}</div><div class="pc-b"><div class="pc-t">{rep}{E(row["title"] or "Без заголовка")}</div>'
             f'{lead}<div class="pc-m meta"><span>{ts_date(row["date"])}</span>'
-            f'{mi("chat_bubble", num(row["comments"]), "Комментарии")}{v.rx.score_html(pairs)}</div></div></a>')
+            f'{mi("chat_bubble", num(row["comments"]), "Комментарии")}{v.rx.score_html(pairs)}{don_h}</div></div></a>')
 
 
 def _entry_link(v: ArchiveView, eid: int | None, cid: int | None = None) -> tuple[str, str]:
@@ -133,9 +136,11 @@ def page_home(v: ArchiveView) -> tuple[str, str]:
     name = prof.get("name") or v.nick
     ext = icon_btn("open_in_new", "Профиль на DTF", prof.get("url") or SITE, attrs=EXT_LINK)
     desc = (prof.get("description") or "").strip()
+    donated = donations_total(v)
     stats = (stat(num(counts["posts"]), plural(counts["posts"], *POSTS), v.links.posts()) +
              (stat(num(counts["my_comments"]), plural(counts["my_comments"], *COMMENTS), v.links.comments())
               if v.comments_on else "") +
+             (stat(rub(donated), "донаты", v.links.donations()) if donated else "") +
              (stat(num(media_n), f"медиа · {human_bytes(media_size)}") if media_n else ""))
     more = lambda label, href: f'<a class="btn text" href="{E(href)}">{E(label)}{icon("chevron_right")}</a>'  # noqa: E731
     yl = "".join(f'<a class="chip" href="{E(v.links.comments())}#y{y}">{y}<span class="n">{num(n)}</span></a>'
@@ -173,8 +178,9 @@ def page_posts(v: ArchiveView) -> tuple[str, str]:
     groups = "".join(f'<h2 class="year-h" id="y{y}">{y}</h2><div class="plist">{"".join(post_card(v, r) for r in x)}</div>'
                      for y, x in by_year.items())
     ck = icon("check", cls="ck")
+    don = (f'<button data-sort="donations">{ck}Донаты</button>' if any(r["donations"] for r in rows) else "")
     sort = (f'<div class="seg sortbar" role="group" aria-label="Сортировка"><button class="on" data-sort="date">{ck}По дате</button>'
-            f'<button data-sort="comments">{ck}Комментарии</button><button data-sort="reactions">{ck}Реакции</button></div>')
+            f'<button data-sort="comments">{ck}Комментарии</button><button data-sort="reactions">{ck}Реакции</button>{don}</div>')
     body = (page_head("Посты", n=len(rows)) + f'<div class="toolbar">{sort}</div>'
             f'<div id="by-year"><div class="chips scroll years">{years}</div>{groups}</div>'
             f'<div id="flat" class="plist" hidden></div>')
@@ -234,6 +240,10 @@ def page_post(v: ArchiveView, pid: int) -> tuple[str, str] | None:
         foot.append(f'<span class="cnt" title="В закладках">{icon("bookmark")}{num(counters["favorites"])}</span>')
     if counters.get("reposts"):
         foot.append(f'<span class="cnt" title="Репосты">{icon("repeat")}{num(counters["reposts"])}</span>')
+    if row["donations"]:
+        when = f" (данные DTF на {ts_human(row['stats_at'])})" if row["stats_at"] else ""
+        foot.append(f'<a class="cnt don" href="{E(v.links.donations())}" title="Донаты{E(when)}">'
+                    f'{icon("volunteer_activism")}{rub(row["donations"])}</a>')
     foot.append(v.rx.score_html(pairs) + v.rx.html(pairs, "/", f"post {pid}", limit=60))
     foot_h = "".join(foot)
     title = p.get("title") or ""
@@ -526,21 +536,3 @@ def page_search(v: ArchiveView, q: str, kind: str, year: str, sort: str, page: i
     body = (head + form + notes + f'<p class="sres-n">Найдено: {num(res.total)}</p>'
             f'<div class="sres">{"".join(blocks) or empty}</div>' + pagination(page, npages, lambda n: link(page=n)))
     return f"Поиск: {q}", body
-
-
-# ---------------------------------------------------------------------- reactions (catalog + dislike editor)
-def page_reactions(v: ArchiveView, form: Any) -> tuple[str, str]:
-    cells = []
-    for row in v.rx.catalog():
-        img = v.rx.img(row["id"], "/") or '<span class="rx-q">?</span>'
-        neg = row["polarity"] == "negative"
-        cells.append(f'<label class="rx-cell" title="Реакция #{row["id"]}"><input type="checkbox" name="neg" '
-                     f'value="{E(str(row["id"]))}"{" checked" if neg else ""}>{img}<span>{E(row["label"] or "")}</span>'
-                     f'{"<span class=rx-old>больше нет на сайте</span>" if row["retired"] else ""}'
-                     f'<span class="rx-ck">{icon("check_circle", fill=True)}</span></label>')
-    inner = (f'<p class="muted small rx-note">DTF считает любую реакцию как +1. Отметьте те, что в архиве считаются '
-             f'дизлайками ▼ — рейтинги пересчитаются на всех страницах. Выбор сохраняется сразу.</p>'
-             f'<div class="rx-grid">{"".join(cells)}</div>')
-    body = (page_head("Управление архивом") + manage_tabs(v.links, "reactions") + "<!--flash-->"
-            + form(v.links.reactions(), inner))
-    return "Реакции", body

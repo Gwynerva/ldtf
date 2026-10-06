@@ -38,7 +38,8 @@ def add_comment_data(arch: Archive) -> None:
     media references of comments (one file only comments use), a stopped-by-guard and a last-sync record."""
     db = arch.db
     db.execute("INSERT INTO posts(id, date, comments_count, tree_status, tree_count, tree_fetched_at) "
-               "VALUES (?, 1790000000, 2, 'ok', 2, 1790000100)", (OWN_POST,))
+               "VALUES (?, 1790000000, 2, 'ok', 2, 1790000100) ON CONFLICT(id) DO UPDATE SET "
+               "comments_count=2, tree_status='ok', tree_count=2, tree_fetched_at=1790000100", (OWN_POST,))
     for cid, state in ((12, None), (22, "removed"), (24, None)):
         db.execute("INSERT INTO my_comments(id, entry_id, date, raw, site_state) VALUES (?, 1, 1790000000, ?, ?)",
                    (cid, b"x" * 100, state))
@@ -337,7 +338,7 @@ class PostsOnlyAppTest(unittest.TestCase):
             self.assertEqual((code, h.get("Location")), (302, "/u/posts/"), path)
         _, body, _ = self.get(f"/u/posts/p/{OWN_POST}")
         self.assertIn("Комментарии в этом архиве не сохраняются", body)
-        self.assertIn("2 комментария на DTF", body)
+        self.assertIn("3 комментария на DTF", body)
         _, body, _ = self.get("/u/posts/search?q=катана")
         self.assertNotIn('name="t"', body)
         self.assertIn("Поиск по постам", body)

@@ -14,3 +14,7 @@ demo-library/
 
 # materials for the DTF announcement (screenshots of someone else's public profile)
 promo/
+
+# release builds (tools/build_release.py) and the in-app updater's work folder
+dist/
+.update/

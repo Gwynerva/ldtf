@@ -176,3 +176,34 @@ class ReactionsTest(unittest.TestCase):
         neg = Reactions({"reactions": []}, MediaResolver(), rep, {"negative": [25]})
         self.assertEqual(neg.split([(25, 2), (1, 5)]), (5, 2))
         self.assertIn("▼ 2", neg.score_html([(25, 2), (1, 5)], 7))
+
+    def test_library_config_and_catalog(self):
+        """One dislike list for the library: per-archive lists of LDTF 1.3 move to it once (the newest wins when they
+        differ); the catalog joins what every archive saved."""
+        import gzip
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+        from dtf_backup.reactions import CONFIG_NAME, Reactions, config_path, library_assets, load_config, save_negative
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = Path(tmp)
+            for nick, neg, rx, age in (("a", [5, 7], [{"id": 1}, {"id": 2, "retired": True}], 100),
+                                       ("b", [25], [{"id": 2}, {"id": 3}], 10)):
+                (lib / nick / "raw").mkdir(parents=True)
+                (lib / nick / "raw" / "profile.json.gz").write_bytes(gzip.compress(b'{"id": 1}'))
+                (lib / nick / "raw" / "assets.json.gz").write_bytes(gzip.compress(json.dumps({"reactions": rx}).encode()))
+                p = lib / nick / CONFIG_NAME
+                p.write_text(json.dumps({"negative": neg}), encoding="utf-8")
+                t = os.path.getmtime(p) - age
+                os.utime(p, (t, t))
+            self.assertEqual(load_config(lib)["negative"], [25])           # b's list is the newest
+            self.assertTrue(config_path(lib).exists())
+            self.assertFalse((lib / "a" / CONFIG_NAME).exists() or (lib / "b" / CONFIG_NAME).exists())
+            self.assertEqual(save_negative(lib, ["7", "x", 7, " 3 "]), [7, 3])
+            self.assertEqual(load_config(lib)["negative"], [7, 3])
+            cat = {str(x["id"]): x for x in library_assets(lib)["reactions"]}
+            self.assertEqual(sorted(cat), ["1", "2", "3"])
+            self.assertFalse(cat["2"].get("retired"))                        # b still has it
+            rx = Reactions.for_library(lib, MediaResolver(), None)
+            self.assertEqual(rx.split([(7, 2), (1, 5)]), (5, 2))

@@ -18,7 +18,7 @@ from .scheduler import human_when
 from .state import META_LAST_SYNC, META_SYNC_ATTEMPT, read_meta
 from .util import log
 from .web.jobs import BLOCKED, DONE, ERROR, PRIORITY_REASONS, RUNNING, RUNNING_TITLES
-from .web.server import Runtime, find_running
+from .web.server import Runtime, find_running, port_problem
 from .web.ui import Links
 
 
@@ -43,16 +43,21 @@ def notice(job: Any, attempt: dict | None, site: dict | None) -> tuple[str, str]
     return None
 
 
-def run_app(library: Path, port: int = DEFAULT_PORT, background: bool = False) -> int:
-    running = find_running(library, port)
+def run_app(library: Path, port: int | None = None, background: bool = False) -> int:
+    running = find_running(library, port or DEFAULT_PORT)
     if running:
         if not background:
             webbrowser.open(running["url"])
         return 0
-    rt = Runtime(library, port, scheduler_delay=120.0 if background else 10.0).start()
+    try:
+        rt = Runtime(library, port, scheduler_delay=120.0 if background else 10.0).start()
+    except OSError as e:
+        log.error(port_problem("127.0.0.1", port, e))
+        return 1
     app = rt.app
     log.info("[app] " + ("запущен в фоне (--background: так его запускает автозапуск с Windows)" if background
                          else "запущен вручную"))
+    refresh_autostart()
 
     def open_ui(path: str = "") -> None:
         webbrowser.open(rt.url + path.lstrip("/"))
@@ -73,13 +78,27 @@ def run_app(library: Path, port: int = DEFAULT_PORT, background: bool = False) -
     return 0
 
 
-def _console(rt: Runtime) -> int:
-    rt.app.on_quit = lambda: threading.Thread(target=rt.stop, daemon=True).start()
+def refresh_autostart() -> None:
+    """The autostart entry follows this copy of the app when it was moved or updated (only the desktop app does this:
+    a console server or a test started from another folder must never touch the user's autostart)."""
     try:
-        while not rt.stopped.wait(0.5):
+        from . import winintegration as win
+        if win.available():
+            win.refresh_autostart()
+            log.info(f"[автозапуск] {win.STATE_TITLES[win.autostart_state()]}")
+    except Exception as e:  # noqa: BLE001 - a stale autostart entry must not stop the app
+        log.warning(f"[app] не удалось обновить автозапуск: {e}")
+
+
+def _console(rt: Runtime) -> int:
+    quit_ = threading.Event()
+    rt.app.on_quit = quit_.set
+    try:
+        while not quit_.wait(0.5):
             pass
     except KeyboardInterrupt:
-        rt.stop()
+        pass
+    rt.stop()
     return 0
 
 

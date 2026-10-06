@@ -14,7 +14,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import DEFAULT_PORT, __version__
+from . import DEFAULT_PORT, __version__, config
 from .api import parse_user_ident
 from .guard import CLI_HINT
 from .media import MEDIA_MODES
@@ -105,7 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p: argparse.ArgumentParser, user: bool = True) -> None:
-        p.add_argument("--root", type=Path, default=DEFAULT_LIBRARY, help="папка с архивами (по умолчанию ./archive)")
+        p.add_argument("--root", type=Path, default=None,
+                       help="папка с архивами (по умолчанию ./archive или LDTF_ROOT)")
         if user:
             p.add_argument("--user", help="пользователь: ник, id или ссылка (petra, 136492, https://dtf.ru/petra)")
             p.add_argument("--out", type=Path, help="папка архива (по умолчанию <root>/<ник>)")
@@ -113,12 +114,17 @@ def main(argv: list[str] | None = None) -> int:
 
     pa = sub.add_parser("app", help="запустить LDTF со значком в трее (Windows) — основной способ работы")
     common(pa, user=False)
-    pa.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"порт (по умолчанию {DEFAULT_PORT})")
+    pa.add_argument("--port", type=int, default=None,
+                    help=f"порт (по умолчанию {DEFAULT_PORT} или следующий свободный; заданный явно — ровно он)")
     pa.add_argument("--background", action="store_true", help="без открытия браузера (автозапуск с Windows)")
 
     pv = sub.add_parser("serve", help="запустить LDTF в консоли (без трея)")
     common(pv, user=False)
-    pv.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"порт (по умолчанию {DEFAULT_PORT})")
+    pv.add_argument("--host", default=None,
+                    help="адрес (по умолчанию 127.0.0.1 — только этот компьютер; 0.0.0.0 — вся сеть, нужен пароль "
+                         "LDTF_PASSWORD; можно задать LDTF_HOST)")
+    pv.add_argument("--port", type=int, default=None,
+                    help=f"порт (по умолчанию {DEFAULT_PORT} или следующий свободный; заданный явно или LDTF_PORT — ровно он)")
     pv.add_argument("--open", action="store_true", help="открыть браузер")
     pv.add_argument("--no-auto-sync", action="store_true", help="без синхронизаций по расписанию (только вручную)")
 
@@ -154,6 +160,10 @@ def main(argv: list[str] | None = None) -> int:
     pc.add_argument("-v", "--verbose", action="store_true", help="подробный лог в консоль")
 
     args = ap.parse_args(argv)
+    if hasattr(args, "root"):
+        args.root = args.root or config.root() or DEFAULT_LIBRARY
+    if hasattr(args, "port"):
+        args.port = args.port or config.port()
 
     if args.cmd == "app":
         setup_logging(None, args.verbose, app_log=args.root / ".state" / "app.log")
@@ -163,8 +173,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve":
         setup_logging(None, args.verbose, app_log=args.root / ".state" / "app.log")
         from .web.server import serve
-        serve(args.root, args.port, args.open, auto_sync=not args.no_auto_sync)
-        return 0
+        return serve(args.root, args.port, args.open, auto_sync=not args.no_auto_sync,
+                     host=args.host or config.host() or "127.0.0.1")
 
     if args.cmd == "check-api":
         setup_logging(None, args.verbose)

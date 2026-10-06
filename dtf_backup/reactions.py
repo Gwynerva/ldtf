@@ -1,8 +1,10 @@
 """Reactions: catalog (raw/assets.json.gz), icons, polarity (likes vs dislikes) and fallbacks.
 
 DTF itself counts every reaction as +1 in `likes.counterLikes` (there are no dislikes on the new
-DTF). Some reactions are clearly negative, so the archive splits them into ▲ positive / ▼ negative
-using an editable config: <archive>/reactions.config.json (created on first render).
+DTF). Some reactions are clearly negative, so LDTF splits them into ▲ positive / ▼ negative using one
+editable config for the whole library: archive/reactions.config.json (reactions are the same for every
+post on DTF; LDTF before 1.4 kept a copy per archive — `load_config` moves it to the library once).
+The catalog is the union of what every archive saved (raw/assets.json.gz).
 Unknown reaction ids (not in the catalog) render as a "?" chip and are listed in the render report.
 """
 
@@ -10,6 +12,7 @@ from __future__ import annotations
 
 import html
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -53,23 +56,119 @@ def reactions_total(obj: dict) -> int:
     return sum(n for _, n in reaction_pairs(obj))
 
 
-def load_config(archive_root: Path) -> dict:
-    path = archive_root / CONFIG_NAME
-    cfg = {
-        "_help": ("Какие реакции считать дизлайками (▼). Укажите id реакций; картинки и id — в data/reactions.json "
-                  "и в LDTF: Управление архивом → Реакции (там же можно отметить их мышкой)."),
-        "negative": DEFAULT_NEGATIVE,
-    }
-    if path.exists():
+HELP = ("Какие реакции считать дизлайками (▼) во всех архивах. Укажите id реакций; картинки и id — в "
+        "data/reactions.json любого архива и в LDTF: Настройки приложения → Реакции (там же их можно отметить мышкой).")
+_CONFIG_LOCK = threading.Lock()
+
+
+def config_path(library: Path) -> Path:
+    return library / CONFIG_NAME
+
+
+def _read_negative(path: Path) -> list | None:
+    try:
+        user = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        log.warning(f"{path} не читается ({e}) — дизлайками считаются реакции по умолчанию.")
+        return None
+    neg = user.get("negative") if isinstance(user, dict) else None
+    return clean_ids(neg) if isinstance(neg, list) else None
+
+
+def clean_ids(ids: Any) -> list[int]:
+    out: list[int] = []
+    for x in ids or []:
         try:
-            user = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(user.get("negative"), list):
-                cfg["negative"] = user["negative"]
-        except (OSError, ValueError) as e:
-            log.warning(f"{path} не читается ({e}) — дизлайками считаются реакции по умолчанию.")
+            i = int(str(x).strip())
+        except (TypeError, ValueError):
+            continue
+        if i not in out:
+            out.append(i)
+    return out
+
+
+def load_config(library: Path) -> dict:
+    """The library's dislike list. The first call after an update from LDTF 1.3 moves the per-archive copies here:
+    the same list everywhere is kept as is; different lists — the most recently edited one wins."""
+    path = config_path(library)
+    neg = _read_negative(path)
+    if neg is None:
+        with _CONFIG_LOCK:
+            neg = _read_negative(path)
+            if neg is None:
+                neg = _migrate(library)
+    return {"_help": HELP, "negative": neg}
+
+
+def _migrate(library: Path) -> list[int]:
+    from .state import archive_dirs
+    found: list[tuple[float, list[int], Path]] = []
+    for d in archive_dirs(library):
+        p = d / CONFIG_NAME
+        neg = _read_negative(p)
+        if neg is not None:
+            found.append((p.stat().st_mtime, neg, p))
+    if not found:
+        neg = list(DEFAULT_NEGATIVE)
+    elif all(sorted(f[1]) == sorted(found[0][1]) for f in found):
+        neg = found[0][1]
     else:
-        write_json(path, cfg)
-    return cfg
+        newest = max(found, key=lambda f: f[0])
+        neg = newest[1]
+        log.info(f"[реакции] в архивах были разные списки дизлайков — взят последний изменённый (@{newest[2].parent.name})")
+    try:
+        write_json(config_path(library), {"_help": HELP, "negative": neg})
+    except OSError as e:   # a read-only library: the list still applies, the archives keep their files
+        log.warning(f"[реакции] не удалось сохранить {config_path(library)}: {e}")
+        return neg
+    for _, _, p in found:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    if found:
+        log.info(f"[реакции] список дизлайков теперь общий для всех архивов: {config_path(library)}")
+    return neg
+
+
+def save_negative(library: Path, ids: Any) -> list[int]:
+    neg = clean_ids(ids)
+    with _CONFIG_LOCK:
+        write_json(config_path(library), {"_help": HELP, "negative": neg})
+    return neg
+
+
+_CATALOG: dict[str, Any] = {"stamp": None, "assets": {}}
+
+
+def library_assets(library: Path) -> dict:
+    """{"reactions": [...]} of every archive of the library together: a reaction is retired only if every archive
+    that knows it says so (cached until an archive saves a new catalog)."""
+    from .state import archive_dirs
+    files = [d / "raw" / "assets.json.gz" for d in archive_dirs(library)]
+    stamp = tuple((str(f), f.stat().st_mtime) for f in files if f.exists())
+    with _CONFIG_LOCK:
+        if _CATALOG["stamp"] == stamp:
+            return _CATALOG["assets"]
+    merged: dict[str, dict] = {}
+    for f, _ in stamp:
+        try:
+            data = read_json_gz(Path(f), {})
+        except (OSError, ValueError):
+            continue
+        for x in data.get("reactions") or []:
+            if not isinstance(x, dict) or x.get("id") is None:
+                continue
+            k = str(x["id"])
+            cur = merged.get(k)
+            if cur is None or (cur.get("retired") and not x.get("retired")):
+                merged[k] = x
+    assets = {"reactions": list(merged.values())}
+    with _CONFIG_LOCK:
+        _CATALOG.update(stamp=stamp, assets=assets)
+    return assets
 
 
 class Reactions:
@@ -80,9 +179,13 @@ class Reactions:
         self.negative = {str(i) for i in (config or {}).get("negative", DEFAULT_NEGATIVE)}
 
     @classmethod
+    def for_library(cls, library: Path, resolver: MediaResolver, report: Any) -> "Reactions":
+        """The reactions every archive of the library saved and the library's dislike list (reactions.config.json)."""
+        return cls(library_assets(library), resolver, report, load_config(library))
+
+    @classmethod
     def for_archive(cls, arch: Any, resolver: MediaResolver, report: Any) -> "Reactions":
-        """The reaction catalog saved with the archive and its dislike settings (reactions.config.json)."""
-        return cls(read_json_gz(arch.raw_assets(), {}), resolver, report, load_config(arch.root))
+        return cls.for_library(arch.library, resolver, report)
 
     def is_negative(self, rid: Any) -> bool:
         return str(rid) in self.negative

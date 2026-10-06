@@ -15,7 +15,7 @@ from .context import ancestors, descendants
 from .normalize import Linker, MediaResolver, comment_text, media_info, post_ref, slug_from_url
 from .reactions import Reactions, reaction_pairs, reactions_total
 from .util import MSK, atomic_write_text, dumps, ts_human, ts_iso, write_json
-from .viewdb import Dataset, group_view, post_cover, post_lead
+from .viewdb import Dataset, group_view, post_cover, post_donations, post_lead
 from .web.ui import CommentView, Links, md_tree, month_title
 
 MD_ROOT = "../../../"   # md/<kind>/<file>.md -> library root (archive/), where media/ lives
@@ -57,7 +57,8 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
             fm = {"id": pid, "title": title, "date": ts_iso(p.get("date")), "dateModified": ts_iso(p.get("dateModified")),
                   "url": url, "comments": counters.get("comments", 0), "reactions": reactions_total(p),
                   "reactionsPositive": rx.split(pairs)[0], "reactionsNegative": rx.split(pairs)[1],
-                  "favorites": counters.get("favorites", 0), "repost": bool(p.get("repostId"))}
+                  "favorites": counters.get("favorites", 0), "donations": post_donations(p),
+                  "repost": bool(p.get("repostId"))}
             md = ["---"] + [f"{k}: {json.dumps(v, ensure_ascii=False)}" for k, v in fm.items()] + ["---", "",
                                                                                                   f"# {title or 'Без заголовка'}", ""]
             if repost_md:
@@ -72,7 +73,8 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
             fp.write(dumps({"id": pid, "url": url, "title": title, "date": p.get("date"), "dateIso": ts_iso(p.get("date")),
                             "dateModified": p.get("dateModified"), "subsite": _subsite(p),
                             "isRepost": bool(p.get("repostId")), "repostOf": repost_norm, "counters": counters,
-                            "reactions": rx.norm(pairs), "lead": post_lead(p), "cover": media_norm(cover),
+                            "reactions": rx.norm(pairs), "donations": post_donations(p), "statsAt": p.get("_statsAt"),
+                            "lead": post_lead(p), "cover": media_norm(cover),
                             "blocks": blocks_norm, "unlisted": ds.unlisted(pid), "source": p.get("_source", "content"),
                             "siteState": (p.get("_site") or {}).get("state"),
                             "local": {"app": links.post(pid), "md": f"md/posts/{md_name}"}}) + "\n")
@@ -81,7 +83,7 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
                                  "date": c["date"], "author": c["author"], "isMine": c["author"] == ds.uid,
                                  "text": comment_text(c["text"]).text, "media": cv.media_parts(c)[2] if c["media"] else [],
                                  "likes": c["likes"], "reactions": rx.norm(c["rx"]), "isRemoved": c["isRemoved"],
-                                 "siteState": c.get("site"), "url": comment_url(pid, c["id"])}) + "\n")
+                                 **_donations(c), "siteState": c.get("site"), "url": comment_url(pid, c["id"])}) + "\n")
                 n_pc += 1
             step("export-posts", i + 1, len(ds.posts))
 
@@ -114,7 +116,8 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
                 fp.write(dumps({"id": s["id"], "postId": eid, "parentId": s["replyTo"] or None, "level": s["level"],
                                 "date": s["date"], "author": s["author"], "isMine": s["author"] == ds.uid,
                                 "text": comment_text(s["text"]).text, "media": mnorm, "likes": s["likes"],
-                                "reactions": rx.norm(s["rx"]), "isRemoved": s["isRemoved"], "siteState": s.get("site")}) + "\n")
+                                "reactions": rx.norm(s["rx"]), "isRemoved": s["isRemoved"], **_donations(s),
+                                "siteState": s.get("site")}) + "\n")
                 n_ctx += 1
     write_json(data / "users.json", {str(k): v for k, v in ds.users.items()}, pretty=False)
     write_json(data / "profile.json", ds.prof)
@@ -133,6 +136,17 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
 
 
 # ---------------------------------------------------------------------- helpers
+def _donations(c: dict) -> dict:
+    """Only when there are any: `donation` — rubles sent with the comment to the post's author, `donationsReceived` —
+    rubles the comment itself got."""
+    out = {}
+    if c.get("donation"):
+        out["donation"] = c["donation"]
+    if c.get("donated"):
+        out["donationsReceived"] = c["donated"]
+    return out
+
+
 def _subsite(p: dict) -> dict | None:
     s = p.get("subsite") or {}
     return {"id": s.get("id"), "name": s.get("name"), "uri": s.get("uri")} if s else None
@@ -175,7 +189,8 @@ def _comment_row(ds: Dataset, c: dict, rx: Reactions, cv: CommentView, links: Li
                     "subsiteName": entry.get("subsiteName"), "isOwn": own},
            "text": comment_text(c["text"]).text, "media": cv.media_parts(c)[2] if c["media"] else [],
            "parentId": c["replyTo"] or None, "level": c["level"], "replyCount": c["replyCount"], "likes": c["likes"],
-           "reactions": rx.norm(c["rx"]), "isEdited": c["isEdited"], "isRemoved": c["isRemoved"], "siteState": c.get("site"),
+           "reactions": rx.norm(c["rx"]), "isEdited": c["isEdited"], "isRemoved": c["isRemoved"], **_donations(c),
+           "siteState": c.get("site"),
            "ancestorIds": anc, "replyIds": reps, "contextStatus": status,
            "local": {"app": links.go(c["id"]), "md": f"md/comments/{c['date'] and _date(c['date'])[:7]}.md"}}
     return row, status
@@ -259,6 +274,7 @@ def _readme(ds: Dataset, counts: dict) -> None:
 archive/                       библиотека приложения
   media/<sha[:2]>/<sha256>.<ext>   ОБЩЕЕ хранилище медиа всех архивов (по содержимому, без дублей)
   .state/media.sqlite              общий каталог медиа: media_ref(key → sha256), blob(sha256, path, size, mime)
+  reactions.config.json            какие реакции считать дизлайками (один список для всех архивов)
   {ds.nick}/                         этот архив
     md/posts/                        посты в Markdown (front matter + текст + дерево комментариев)
     md/comments/ГГГГ-ММ.md           комментарии пользователя за месяц, сгруппированные по веткам обсуждений
@@ -266,7 +282,6 @@ archive/                       библиотека приложения
     raw/                             сырые ответы API DTF (.json.gz) — источник истины без потерь
     .state/state.sqlite              прогресс синхронизации; media_use — какие медиа нужны архиву
     .state/view.sqlite               база для приложения (посты, комментарии, группы, FTS5-поиск)
-    reactions.config.json            какие реакции считать дизлайками
 ```
 
 ## Данные для агентов (`data/`)
@@ -276,14 +291,16 @@ archive/                       библиотека приложения
 
 - `profile.json` — сырой профиль.
 - `posts.jsonl` — 1 строка = 1 пост: `id, url, title, date, dateIso, dateModified, subsite, isRepost, repostOf,
-  counters, reactions, lead, cover, blocks[], unlisted, local{{app, md}}`. Блок: `{{type, supported, anchor?, spoiler?,
+  counters, reactions, donations, statsAt, lead, cover, blocks[], unlisted, local{{app, md}}`. `counters`, `reactions` и
+  `donations` (рубли, сумма самого DTF) — на момент `statsAt`: их обновляет каждая синхронизация, а не только правка поста. Блок: `{{type, supported, anchor?, spoiler?,
   cover?, ...поля}}`, `supported`: `true` — полная поддержка, `"generic"` — упрощённо (исходник в `raw`), `false` —
   неизвестный тип (исходный JSON в `raw`). Медиа: `{{key, kind, local, remote, width, height, ...}}`
   (`local` — путь в общем хранилище, если файл скачан; `gone: true` — DTF ответил, что файла больше нет).
   Блок `media`: `items[{{media, caption}}]` и `title`; `caption` — подпись автора к картинке, `title` — ко всей галерее
   (есть не у всех; других описаний картинок DTF не хранит).
 - `post-comments.jsonl` — все комментарии под постами пользователя: `id, postId, parentId, level, date, author, isMine,
-  text, media, likes, reactions, isRemoved, url`.
+  text, media, likes, reactions, isRemoved, donation?, donationsReceived?, url`. `donation` — рубли, отправленные автору
+  поста вместе с комментарием (донат-комментарий), `donationsReceived` — сколько получил сам комментарий.
 - `comments.jsonl` — 1 строка = 1 комментарий пользователя: `id, date, url, post{{id, title, subsiteId, subsiteName, isOwn}},
   text, media, parentId, level, replyCount, likes, reactions, isEdited, isRemoved, ancestorIds[] (от корня к
   родителю), replyIds[] (всё поддерево ответов), contextStatus (ok|not_needed|missing|not_fetched|no_post), local`.
@@ -294,7 +311,8 @@ archive/                       библиотека приложения
 - `users.json` — авторы: `id -> {{name, nickname, uri, avatar}}`.
 - `reactions.json` — каталог реакций: `id, label, type, polarity (positive|negative), retired, static/animated`.
   Поле `reactions`: `{{total, positive, negative, items[{{id, count, polarity, label?, unknown?}}]}}`. DTF считает любую
-  реакцию как +1 (`likes`); деление на ▲/▼ задаётся в `reactions.config.json`.
+  реакцию как +1 (`likes`); деление на ▲/▼ задаётся в `archive/reactions.config.json` — один список для всех архивов
+  (в LDTF: Настройки приложения → Реакции).
 - `media.jsonl` — медиа архива: `key (uuid|url), sha256, path, size, mime, missing?, usedBy[]`
   (`post:<id>`, `mc:<id>` — комментарий пользователя, `pc:<id>` — комментарий под постом пользователя, `avatar:<id>`, `reaction:<id>`, `profile`).
 

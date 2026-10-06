@@ -12,13 +12,16 @@ mass loss stops the sync (exit code 4, meta `guard`) before anything is written.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import shutil
+import sys
 import threading
 import time
 from collections import Counter, defaultdict, deque
 from enum import IntEnum
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from .api import Dtf, comment_url, is_not_found, post_url
@@ -417,12 +420,16 @@ class Syncer:
             if p["id"] in stubs:   # a placeholder: keep the archived counters and content, only note it is listed
                 db.execute("UPDATE posts SET listed_at=? WHERE id=?", (now, p["id"]))
                 continue
+            # the listing brings every post's live counters, reactions and donations: a post itself is downloaded
+            # again only when it is edited, so the pages take these (viewdb.Dataset)
             db.execute(
-                "INSERT INTO posts(id,date,date_modified,comments_count,is_repost,listed_at) VALUES(?,?,?,?,?,?) "
+                "INSERT INTO posts(id,date,date_modified,comments_count,is_repost,listed_at,stats,stats_at) "
+                "VALUES(?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET date=excluded.date, date_modified=excluded.date_modified, "
-                "comments_count=excluded.comments_count, is_repost=excluded.is_repost, listed_at=excluded.listed_at",
+                "comments_count=excluded.comments_count, is_repost=excluded.is_repost, listed_at=excluded.listed_at, "
+                "stats=excluded.stats, stats_at=excluded.stats_at",
                 (p["id"], p.get("date"), p.get("dateModified"), (p.get("counters") or {}).get("comments", 0),
-                 1 if p.get("repostId") else 0, now))
+                 1 if p.get("repostId") else 0, now, json.dumps(live_stats(p), ensure_ascii=False), now))
         a.set_meta("posts_listed_at", now)
         a.commit()
 
@@ -989,6 +996,17 @@ class Syncer:
         log.info(f"[медиа] готово: {dict(st)}")
 
 
+def live_stats(p: dict) -> dict:
+    """What changes on a post without an edit: counters, reactions, donations, gifts (from the listing)."""
+    out: dict[str, Any] = {}
+    for k in ("counters", "reactions", "donations", "likes"):
+        if isinstance(p.get(k), dict):
+            out[k] = p[k]
+    if isinstance(p.get("gifts"), list):
+        out["gifts"] = len(p["gifts"])
+    return out
+
+
 _HELD: set[str] = set()   # locks held by this process
 _HELD_LOCK = threading.Lock()
 
@@ -1059,6 +1077,15 @@ def _pid_alive(pid: int) -> bool:
         ok = k.GetExitCodeProcess(h, ctypes.byref(code))
         k.CloseHandle(h)
         return bool(ok) and code.value == 259  # STILL_ACTIVE
+    if sys.platform.startswith("linux"):
+        # a container has few PIDs and threads take ids from the same space: a stale lock of `docker exec ... sync`
+        # must not look alive because a thread of the app (or a healthcheck) now has that number
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8", errors="replace")
+            tgid = next((int(line.split()[1]) for line in status.splitlines() if line.startswith("Tgid:")), 0)
+            return tgid == pid and b"dtf_backup" in Path(f"/proc/{pid}/cmdline").read_bytes()
+        except (OSError, ValueError, IndexError):
+            return False
     try:
         os.kill(pid, 0)
         return True

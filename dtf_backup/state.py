@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS posts (
     listed_at INTEGER,
     content_modified INTEGER, content_fetched_at INTEGER, content_status TEXT, content_error TEXT,
     tree_count INTEGER, tree_fetched_at INTEGER, tree_status TEXT, tree_error TEXT,
-    site_state TEXT, site_state_at INTEGER          -- what happened on DTF (guard.py): removed | wiped | gone ...
+    site_state TEXT, site_state_at INTEGER,         -- what happened on DTF (guard.py): removed | wiped | gone ...
+    stats TEXT, stats_at INTEGER                    -- live counters, reactions, donations from the latest listing
 );
 
 CREATE TABLE IF NOT EXISTS my_comments (
@@ -294,11 +295,17 @@ def peek_meta(root: Path, key: str) -> Any:
     return (read_meta(root, [key]) or {}).get(key)
 
 
+ADDED_COLUMNS = {
+    "posts": (("site_state", "TEXT"), ("site_state_at", "INTEGER"), ("stats", "TEXT"), ("stats_at", "INTEGER")),
+    "my_comments": (("site_state", "TEXT"), ("site_state_at", "INTEGER")),
+}
+
+
 def _add_columns(db: sqlite3.Connection) -> None:
     """Columns added after the first release (CREATE TABLE IF NOT EXISTS keeps old tables as they are)."""
-    for table in ("posts", "my_comments"):
+    for table, added in ADDED_COLUMNS.items():
         cols = {r[1] for r in db.execute(f"PRAGMA main.table_info({table})")}
-        for col, typ in (("site_state", "TEXT"), ("site_state_at", "INTEGER")):
+        for col, typ in added:
             if col not in cols:
                 db.execute(f"ALTER TABLE main.{table} ADD COLUMN {col} {typ}")
     db.commit()

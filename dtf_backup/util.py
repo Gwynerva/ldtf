@@ -174,6 +174,11 @@ def num(n: int | float) -> str:
     return f"{int(n):,}".replace(",", " ")  # no-break space: "89 675" never splits across lines
 
 
+def rub(n: int | float) -> str:
+    """"57 362 ₽" (donations on DTF are rubles)."""
+    return f"{num(n)}\u00a0₽"
+
+
 def count_label(n: int, one: str, few: str, many: str) -> str:
     """"89 675 комментариев"."""
     return f"{num(n)} {plural(n, one, few, many)}"

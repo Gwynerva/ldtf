@@ -195,13 +195,14 @@ class JobManager:
             return plan_stages(None, kind)
 
     # ------------------------------------------------------------------ API
-    def submit(self, nick: str, kind: str = "sync", **params: Any) -> Job:
+    def submit(self, nick: str, kind: str = "sync", after_running: bool = False, **params: Any) -> Job:
         """Queue a job (the same kind already queued or running for the archive is returned instead). A sync also
         builds the archive, so it replaces a rebuild still waiting in the queue, and a rebuild asked while a sync
-        waits is that sync."""
+        waits is that sync. `after_running`: a running job of the kind doesn't count (it started before the change
+        that asks for this one), only a queued one."""
         assert kind in KINDS, kind
         with self.cond:
-            for j in list(self.queue) + self.running:
+            for j in list(self.queue) + ([] if after_running else self.running):
                 if j.nick == nick and j.state in ACTIVE and (j.kind == kind or (
                         kind == "render" and j.kind == "sync" and j.state == QUEUED)):
                     return j

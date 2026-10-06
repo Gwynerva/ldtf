@@ -55,13 +55,15 @@ def make_archive(library: Path, nick: str = "tester") -> Archive:
     gz(root / "raw" / "posts" / f"{OWN_POST}.json.gz", {
         "id": OWN_POST, "date": t, "title": "Мой пост про катану", "url": f"https://dtf.ru/{nick}/{OWN_POST}-katana",
         "counters": {"comments": 2}, "reactions": {"counters": [{"id": 1, "count": 3}]},
+        "donations": {"amount": 100, "isDonated": False},
         "blocks": [{"type": "text", "data": {"text": "<p>Текст про <b>катану</b></p>"}},
                    {"type": "media", "data": {"items": [{"image": {"type": "image", "data": {"uuid": IMG, "type": "jpg"}}},
                                                         {"image": {"type": "image", "data": {"uuid": IMG, "type": "jpg"}}}]}},
                    {"type": "futureBlock", "data": {"x": 1}}]})
     gz(root / "raw" / "post-trees" / f"{OWN_POST}.json.gz", {"items": [
-        comment(11, 0, 0, 42, "Гость", t + 10, "Первый!", OWN_POST),
-        comment(12, 11, 1, UID, "Тестер", t + 20, "Спасибо", OWN_POST)]})
+        dict(comment(11, 0, 0, 42, "Гость", t + 10, "Первый!", OWN_POST), donation=300),
+        dict(comment(12, 11, 1, UID, "Тестер", t + 20, "Спасибо", OWN_POST), donations={"amount": 50}),
+        dict(comment(13, 0, 0, 44, "Молчун", t + 15, "", OWN_POST), donation=150)]})
     # the user's feed: one comment under the own post, a dialog of two replies in a foreign thread
     feed = [comment(12, 11, 1, UID, "Тестер", t + 20, "Спасибо", OWN_POST, "Мой пост про катану"),
             comment(22, 21, 1, UID, "Тестер", t + 30, "> цитата\nОтвет", FOREIGN, "Чужой пост"),
@@ -74,6 +76,10 @@ def make_archive(library: Path, nick: str = "tester") -> Archive:
         comment(24, 23, 3, UID, "Тестер", t + 50, "Ещё ответ", FOREIGN)]})
     arch = Archive(root, library)
     arch.set_meta("user_id", UID)
+    # the latest listing: fresher counters, reactions and donations than the post's download
+    arch.db.execute("INSERT INTO posts(id, date, stats, stats_at) VALUES (?,?,?,?)",
+                    (OWN_POST, t, json.dumps({"counters": {"comments": 3}, "reactions": {"counters": [{"id": 1, "count": 4}]},
+                                              "donations": {"amount": 500}}), t + 100))
     arch.queue_media([(IMG, None, "jpg")], f"post:{OWN_POST}")
     arch.commit()
     # the file itself in the shared store
@@ -170,8 +176,8 @@ class AppTest(unittest.TestCase):
     # ---------------------------------------------------------------- pages
     def test_pages(self) -> None:
         for path in ("/u/tester/", "/u/tester/posts", f"/u/tester/p/{OWN_POST}", "/u/tester/comments",
-                     "/u/tester/c/2026-09", "/u/tester/search?q=катана", "/u/tester/reactions", "/u/tester/sync",
-                     "/u/tester/settings", "/archives", "/add", "/diagnostics"):
+                     "/u/tester/c/2026-09", "/u/tester/search?q=катана", "/app/reactions", "/u/tester/sync",
+                     "/u/tester/settings", "/archives", "/add", "/diagnostics", "/app"):
             code, body, _ = self.get(path)
             self.assertEqual(code, 200, path)
             self.assertNotIn("<h1>Ошибка", body, path)
@@ -195,6 +201,39 @@ class AppTest(unittest.TestCase):
         code, _, h = self.get("/u/tester/go/c/23", redirect=False)
         self.assertEqual(code, 302)
         self.assertIn("/u/tester/c/2026-09#c23", h.get("Location", ""))
+
+    def test_donations(self) -> None:
+        """Fresh stats from the listing override the downloaded post; donation comments, donors and what the owner's
+        comments got are on the donations page; the total is DTF's sum (never added to the comments)."""
+        import sqlite3
+        db = sqlite3.connect(self.arch.view_path)
+        try:
+            self.assertEqual(db.execute("SELECT donations, comments FROM posts WHERE id=?", (OWN_POST,)).fetchone(), (500, 3))
+            self.assertEqual(dict(db.execute("SELECT id, donation FROM comments WHERE donation>0").fetchall()),
+                             {11: 300, 13: 150})
+            self.assertEqual(db.execute("SELECT donated FROM comments WHERE id=12").fetchone()[0], 50)   # tree copy
+        finally:
+            db.close()
+        code, body, _ = self.get("/u/tester/donations")
+        self.assertEqual(code, 200)
+        self.assertIn("500\u00a0₽", body)                       # the post: DTF's sum
+        self.assertIn("450\u00a0₽", body)                       # with a comment: 300 + 150
+        self.assertIn("Гость", body)
+        self.assertIn("Без текста — только донат", body)
+        self.assertIn("+50\u00a0₽", body)                       # the owner's comment got 50
+        code, body, _ = self.get(f"/u/tester/p/{OWN_POST}")
+        self.assertIn('class="cnt don"', body)
+        self.assertIn("Донат 300\u00a0₽", body)
+        self.assertIn("c-don-only", body)
+        code, body, _ = self.get("/u/tester/posts")
+        self.assertIn('data-sort="donations"', body)
+        code, body, _ = self.get("/u/tester/")
+        self.assertIn("/u/tester/donations", body)
+        rows = [json.loads(x) for x in (self.arch.root / "data" / "posts.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual((rows[0]["donations"], rows[0]["counters"]["comments"]), (500, 3))
+        rows = {r["id"]: r for r in (json.loads(x) for x in
+                                     (self.arch.root / "data" / "post-comments.jsonl").read_text(encoding="utf-8").splitlines())}
+        self.assertEqual((rows[11]["donation"], rows[12]["donationsReceived"]), (300, 50))
 
     def test_shell(self) -> None:
         import re
@@ -291,18 +330,31 @@ class AppTest(unittest.TestCase):
             self.app.invalidate()
 
     def test_autosave_reactions(self) -> None:
-        from dtf_backup.reactions import CONFIG_NAME
-        cfg = self.arch.root / CONFIG_NAME
+        """One dislike list for every archive, in the app settings; the old per-archive page leads there; a change
+        rebuilds data/ and md/ of the archives a few seconds after the last one."""
+        from dtf_backup.reactions import config_path
+        cfg = config_path(self.library)
         before = cfg.read_bytes() if cfg.exists() else None
+        asked: list = []
+        real = self.app.rebuild_all_soon
+        self.app.rebuild_all_soon = lambda *a, **k: asked.append(1)   # type: ignore[method-assign]
         try:
-            code, body, _ = self.get("/u/tester/reactions")
+            code, _, h = self.get("/u/tester/reactions", redirect=False)
+            self.assertEqual((code, h.get("Location")), (302, "/app/reactions"))
+            code, body, _ = self.get("/app/reactions")
             self.assertIn("data-autosave", body)
             self.assertNotIn("savebar", body)
-            code, j = self.post_json("/u/tester/reactions", {"_csrf": self.app.csrf, "neg": ["", "1"]})
+            self.assertIn('class="tabs"', body)
+            code, j = self.post_json("/app/reactions", {"_csrf": self.app.csrf, "neg": ["", "1"]})
             self.assertEqual((code, j["values"]["neg"]), (200, ["1"]))
-            code, j = self.post_json("/u/tester/reactions", {"_csrf": self.app.csrf, "neg": [""]})   # none checked
+            self.assertEqual(json.loads(cfg.read_text(encoding="utf-8"))["negative"], [1])
+            code, body, _ = self.get(f"/u/tester/p/{OWN_POST}")
+            self.assertIn('class="neg">▼ 4', body)                 # pages switch at once (4: the latest listing)
+            code, j = self.post_json("/app/reactions", {"_csrf": self.app.csrf, "neg": [""]})   # none checked
             self.assertEqual((code, j["values"]["neg"]), (200, []))
+            self.assertEqual(len(asked), 2)
         finally:
+            self.app.rebuild_all_soon = real   # type: ignore[method-assign]
             if before is None:
                 cfg.unlink(missing_ok=True)
             else:
@@ -415,7 +467,7 @@ class AppTest(unittest.TestCase):
 
     def test_no_emoji_chrome(self) -> None:
         for p in ["/u/tester/", "/u/tester/posts", f"/u/tester/p/{OWN_POST}", "/u/tester/comments", "/u/tester/c/2026-09",
-                  "/u/tester/search?q=катана", "/u/tester/reactions", "/u/tester/sync", "/u/tester/settings", "/archives",
+                  "/u/tester/search?q=катана", "/app/reactions", "/u/tester/sync", "/u/tester/settings", "/archives",
                   "/add", "/diagnostics"]:
             _, body, _ = self.get(p)
             for ch in "📝📄💬🔖🔁⟳■✓✗↗▸▾↳📎📊📁⚠♥":
