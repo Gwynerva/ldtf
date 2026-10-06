@@ -200,7 +200,8 @@ LDTF — сервер [MCP](https://modelcontextprotocol.io): Claude, Cursor и 
 - **На этом компьютере (stdio):** агент сам запускает `runtime\python.exe -X utf8 -m dtf_backup mcp` (LDTF при этом
   может быть не запущен). Готовые команды — в «Настройках приложения → ИИ-агенты», например для Claude Code:
   `claude mcp add --scope user ldtf -- "C:\LDTF\runtime\python.exe" -X utf8 -m dtf_backup mcp`.
-  Нужен именно `python.exe`, не `pythonw.exe`.
+  Нужен именно `python.exe`, не `pythonw.exe`. В папке релиза лежит `.mcp.json` с этой же командой: Claude Code,
+  запущенный в папке LDTF, предложит подключить архивы сам.
 - **По сети (HTTP):** запущенный LDTF принимает запросы на `http://<адрес>/mcp` с заголовком
   `Authorization: Bearer <токен>`. Токен — на той же вкладке (его можно выпустить заново); хранится в
   `archive/.state/mcp.token`, в Docker его можно задать переменной `LDTF_MCP_TOKEN`.
@@ -252,6 +253,7 @@ docker compose exec ldtf python -m dtf_backup status --user <ник>
 
 ```
 LDTF.exe                        запуск (значок в трее, без консоли); release.json — состав версии для обновлений
+.mcp.json                       сервер MCP для агентов, запущенных в этой папке (только в релизе)
 dtf-backup.cmd                  консольный режим (для скриптов)
 LDTF.cmd, LDTF (консоль).cmd    запуск из клона репозитория; ldtf.sh — macOS и Linux
 runtime/                        встроенный Python 3.14 (Windows, официальная сборка python.org)

@@ -70,7 +70,11 @@ def app_agents_page(app: "App", base_url: str, notice: str = FLASH) -> str:
              + code_box("mcp-json", json.dumps(stdio_json, ensure_ascii=False, indent=2),
                         "Claude Desktop, Cursor и другие — блок для файла настроек MCP")
              + '<p class="muted small">Claude Desktop: Настройки → Developer → Edit Config, добавьте блок в '
-               '<code>claude_desktop_config.json</code> и перезапустите Claude.</p></section>')
+               '<code>claude_desktop_config.json</code> и перезапустите Claude.</p>'
+             + (f'<p class="muted small">В папке LDTF уже есть <code>.mcp.json</code>: Claude Code, запущенный в '
+                f'<code>{E(str(APP_ROOT))}</code>, сам предложит подключить архивы.</p>'
+                if not docker and not root_args and (APP_ROOT / ".mcp.json").exists() else "")
+             + '</section>')
     reach = ("Работает, пока запущен LDTF." + ("" if app.remote else
              " LDTF сейчас доступен только с этого компьютера: для других устройств запустите его с --host или в Docker."))
     regen = app.shell.form("/app/agents/token", btn("Выпустить новый токен", "text sm", "key"),

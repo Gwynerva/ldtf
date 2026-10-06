@@ -20,8 +20,8 @@ jobs:
           - {os: ubuntu-latest, python: "3.14"}
           - {os: windows-latest, python: "3.14"}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Unit tests (stdlib only, no network)
@@ -31,7 +31,7 @@ jobs:
     name: docker image (smoke)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: docker build -t ldtf:ci .
       - name: Refuses the network without a password, starts with one, needs a login
         run: |

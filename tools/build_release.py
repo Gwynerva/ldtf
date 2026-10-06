@@ -6,7 +6,8 @@
 
 The zip holds one folder, LDTF/: LDTF.exe (the launcher, tools/launcher/LDTF.cs built with csc.exe of .NET Framework 4,
 Windows only), runtime/ (the embeddable Python with the app folder on its path), the app (git archive: .gitattributes
-export-ignore keeps tests, tools and the Docker files out) and release.json — what the in-app updater manages:
+export-ignore keeps tests, tools and the Docker files out), .mcp.json (the MCP server for agents started in the folder)
+and release.json — what the in-app updater manages:
 {version, platform, python, runtime (fingerprint), files (top-level entries)}.
 """
 
@@ -41,6 +42,9 @@ PTH = """python{v}.zip
 # Uncomment to run site.main() automatically
 #import site
 """
+# .mcp.json: Claude Code and other agents started in the LDTF folder find the MCP server by themselves; the command is
+# relative to that folder and reads the library next to it (archive/) - as "Настройки приложения → ИИ-агенты" shows
+MCP_JSON = {"mcpServers": {"ldtf": {"command": "runtime\\python.exe", "args": ["-X", "utf8", "-m", "dtf_backup", "mcp"]}}}
 
 
 def version() -> str:
@@ -136,6 +140,7 @@ def build(args: argparse.Namespace) -> Path:
     app_files(app, args.worktree)
     pyver = runtime(app / "runtime", Path(args.runtime).resolve() if args.runtime else None, out)
     launcher(app, ver, stage)
+    (app / ".mcp.json").write_text(json.dumps(MCP_JSON, indent=2) + "\n", encoding="utf-8")
     files = sorted(p.name for p in app.iterdir())
     meta = {"version": ver, "platform": PLATFORM, "python": pyver, "runtime": fingerprint(app / "runtime"),
             "built": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"), "files": files + ["release.json"]}
