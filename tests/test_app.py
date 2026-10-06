@@ -495,6 +495,34 @@ class AppTest(unittest.TestCase):
             shutil.rmtree(bad, ignore_errors=True)
             self.app.invalidate()
 
+    def test_view_of_an_older_ldtf_waits_for_its_rebuild(self) -> None:
+        """Right after an update an archive keeps the old view until the app has rebuilt it: its pages show the sync
+        tab with the rebuild's progress instead of failing on columns the old view lacks (a 500 for petra in 1.4.0)."""
+        import sqlite3
+        from dtf_backup.viewdb import VIEW_FORMAT, open_view, view_outdated
+
+        def set_format(n: int) -> None:
+            db = sqlite3.connect(self.arch.view_path)
+            try:
+                db.execute("UPDATE meta SET value=? WHERE key='view_format'", (json.dumps(n),))
+                db.commit()
+            finally:
+                db.close()
+        set_format(VIEW_FORMAT - 1)
+        self.app.invalidate()
+        try:
+            self.assertIsNone(open_view(self.arch))
+            self.assertTrue(view_outdated(self.arch))
+            code, _, h = self.get("/u/tester/", redirect=False)
+            self.assertEqual((code, h.get("Location")), (302, "/u/tester/sync"))
+            for p in ("/u/tester/sync", "/archives", "/blocks", "/app"):
+                self.assertEqual(self.get(p)[0], 200, p)
+        finally:
+            set_format(VIEW_FORMAT)
+            self.app.invalidate()
+        self.assertFalse(view_outdated(self.arch))
+        self.assertEqual(self.get("/u/tester/")[0], 200)
+
     def test_add_deleted_account(self) -> None:
         import json as _json
         from dtf_backup.web.app_pages import add_page

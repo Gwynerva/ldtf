@@ -78,7 +78,9 @@ class _View:
         self.arch = arch
         db = open_view(arch)
         if db is None:
-            raise ToolError(f"архив @{arch.nick} ещё не собран — дождитесь окончания первой синхронизации")
+            raise ToolError(f"архив @{arch.nick} сейчас пересобирается — повторите через пару минут"
+                            if arch.view_path.exists() else
+                            f"архив @{arch.nick} ещё не собран — дождитесь окончания первой синхронизации")
         try:
             self.meta = view_meta(db)
             self.users = {r[0]: {"name": r[1], "nickname": r[2]} for r in db.execute("SELECT id, name, nickname FROM users")}

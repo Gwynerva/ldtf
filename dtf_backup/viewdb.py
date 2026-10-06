@@ -480,16 +480,21 @@ def _replace(tmp: Path, final: Path) -> None:
 
 
 def open_view(arch: Archive) -> sqlite3.Connection | None:
-    """The built view, or None when there is none yet — or the file is empty/damaged (then the archive just looks
-    unbuilt and the next render replaces it, instead of one bad file breaking every page of the app)."""
+    """The built view, or None when there is none yet — or the file is empty/damaged, or an older LDTF built it
+    (VIEW_FORMAT: today's pages and tools would miss its columns). Then the archive just looks unbuilt until the
+    rebuild the app starts by itself replaces the file, instead of one old or bad file breaking pages."""
     if not arch.view_path.exists():
         return None
     try:
         db = connect_ro(arch.view_path, timeout=30)
-        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() is None:
-            db.close()
-            return None
-        return db
+        try:
+            row = db.execute("SELECT value FROM meta WHERE key='view_format'").fetchone()
+            if (json.loads(row[0]) if row else 1) >= VIEW_FORMAT:
+                return db
+        except (sqlite3.Error, ValueError):
+            pass
+        db.close()
+        return None
     except sqlite3.DatabaseError:
         return None
 
@@ -513,10 +518,5 @@ def view_outdated(arch: Archive) -> bool:
     db = open_view(arch)
     if db is None:
         return True
-    try:
-        row = db.execute("SELECT value FROM meta WHERE key='view_format'").fetchone()
-        return (json.loads(row[0]) if row else 1) < VIEW_FORMAT
-    except (sqlite3.Error, ValueError):
-        return True
-    finally:
-        db.close()
+    db.close()
+    return False
