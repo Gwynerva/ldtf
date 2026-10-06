@@ -12,7 +12,7 @@ import time
 import urllib.parse
 from typing import TYPE_CHECKING, Any, Callable
 
-from .. import __version__
+from .. import __version__, config
 from .. import winintegration as win
 from ..api import is_not_found
 from ..guard import ACCEPTABLE, account_problem, site_summary, state_title
@@ -441,16 +441,21 @@ def app_settings_page(app: "App", notice: str = FLASH) -> str:
         form += app.shell.form("/app/shortcut", "", fid="shortcuts")
     row = lambda label, hint, control="": (f'<div class="setting"><span class="setting-t"><span class="field-l">{label}</span>'  # noqa: E731
                                           f'<span class="field-h">{hint}</span></span>{control}</div>')
+    stop = ("" if config.docker() else
+            row("Остановить LDTF", "Идущие синхронизации сохранят прогресс и продолжатся при следующем запуске.",
+                app.shell.form("/app/quit", btn("Остановить", "danger tonal sm", "power_settings_new"),
+                               confirm="Остановить LDTF?")))
+    access = ""
+    if app.gate is not None:
+        access = row("Выйти", "Этот браузер снова попросит пароль. Пароль задаётся при запуске сервера (LDTF_PASSWORD).",
+                     app.shell.form("/logout", btn("Выйти", "outlined sm", "logout")))
     about = (f'<section class="card fgroup"><h2>{icon("info")}О приложении</h2>'
-             + row("Версия", f"LDTF {E(__version__)}")
+             + row("Версия", f"LDTF {E(__version__)}" + (" · Docker" if config.docker() else ""))
              + row("Папка архивов", f"<code>{E(str(app.library))}</code>")
              + row("Совместимость с DTF", "Проверяет, не изменил ли DTF то, на что опирается синхронизация. "
                    "Пригодится, если синхронизации стали заканчиваться ошибками.",
                    btn("Проверить", "outlined sm", "network_check", href="/diagnostics"))
-             + row("Остановить LDTF", "Идущие синхронизации сохранят прогресс и продолжатся при следующем запуске.",
-                   app.shell.form("/app/quit", btn("Остановить", "danger tonal sm", "power_settings_new"),
-                                  confirm="Остановить LDTF?"))
-             + "</section>")
+             + access + stop + "</section>")
     body = page_head("Настройки приложения") + app_tabs("app") + notice + form + about
     return app.page("Настройки приложения", body, active="app")
 
@@ -588,8 +593,8 @@ def post_shortcut(h: "Handler", app: "App", f: dict, val: Callable[..., str]) ->
 def post_quit(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
     app.request_quit()   # the server is stopping: this page is the last one it serves (no links to follow)
     return h.html(app.page("LDTF остановлен", empty_state(
-        "power_settings_new", "LDTF остановлен", "Синхронизации сохранили прогресс. Запустите LDTF снова ярлыком "
-        "или файлом LDTF.cmd.", tag="h1"), bare=True))
+        "power_settings_new", "LDTF остановлен", "Синхронизации сохранили прогресс. Запустите LDTF снова — ярлыком "
+        "или файлом LDTF.exe в папке приложения.", tag="h1"), bare=True))
 
 
 def post_diagnostics(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
@@ -618,13 +623,18 @@ def post_reactions(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -
                  values={"neg": [str(x) for x in neg]})
 
 
+def post_logout(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
+    from .auth import handle_logout
+    return handle_logout(h)
+
+
 def post_agents_token(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
     app.reset_mcp_token()
     return h.redirect("/app/agents", flash=snackbar("Выпущен новый токен — обновите настройки агентов"))
 
 
 APP_ACTIONS = {"/add": post_add, "/app": post_app_settings, "/app/shortcut": post_shortcut, "/app/quit": post_quit,
-               "/app/reactions": post_reactions, "/app/agents/token": post_agents_token,
+               "/app/reactions": post_reactions, "/app/agents/token": post_agents_token, "/logout": post_logout,
                "/diagnostics": post_diagnostics}
 
 

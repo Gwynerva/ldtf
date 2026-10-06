@@ -520,6 +520,17 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--mark); color: inher
 .pos { color: var(--pos); }
 .neg { color: var(--neg); }
 
+/* ======================================================================= login (a server reachable over the network) */
+.login { display: flex; flex-direction: column; gap: 14px; max-width: 400px; margin: 10vh auto 0; padding: 32px 28px 28px;
+  text-align: center; }
+.login-logo { margin: 0 auto; border-radius: var(--r-lg); }
+.login h1 { margin: 0; }
+.login p { margin: 0; font-size: 14px; }
+.login .field { text-align: left; }
+.login .btn { width: 100%; height: 44px; }
+.login-err { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 12px; border-radius: var(--r-md);
+  background: var(--error-container); color: var(--on-error-container); }
+
 /* ======================================================================= app settings: AI agents (MCP) */
 .mcp-tools { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 6px 16px;
   margin: 12px 0 0; padding: 0; list-style: none; font-size: 14px; }

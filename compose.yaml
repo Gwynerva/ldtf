@@ -1,0 +1,23 @@
+# LDTF в Docker.
+#   1. Рядом с этим файлом создайте .env с паролем веб-интерфейса:  LDTF_PASSWORD=придумайте-пароль
+#   2. docker compose up -d   →   http://<адрес сервера>:8765
+# Обновление до новой версии:  docker compose pull && docker compose up -d   (архивы в ./data остаются)
+# Консоль LDTF:  docker compose exec ldtf python -m dtf_backup status --user <ник>
+services:
+  ldtf:
+    image: ghcr.io/gwynerva/ldtf:latest
+    # build: .                       # или собрать образ из исходников этой папки
+    container_name: ldtf
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s           # синхронизации успевают сохранить прогресс
+    user: "${LDTF_UID:-1000}:${LDTF_GID:-1000}"   # владелец папки ./data на сервере
+    environment:
+      TZ: Europe/Moscow              # по этому времени идёт расписание «каждый день в 09:00»
+      LDTF_PASSWORD: ${LDTF_PASSWORD:?задайте LDTF_PASSWORD в файле .env рядом с compose.yaml}
+      # LDTF_AUTH: "off"             # без пароля — только если вход уже проверяет обратный прокси
+      # LDTF_MCP_TOKEN: ...          # свой токен для ИИ-агентов (иначе LDTF выпустит его сам)
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8765:8765"        # только с этого сервера (за обратным прокси); для всей сети: "8765:8765"

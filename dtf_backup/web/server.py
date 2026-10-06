@@ -62,13 +62,14 @@ def library_id(library: Path) -> str:
 
 
 class App:
-    def __init__(self, library: Path, port: int, host: str = "127.0.0.1"):
+    def __init__(self, library: Path, port: int, host: str = "127.0.0.1", password: str | None = None):
         self.library = library.resolve()
         self.library.mkdir(parents=True, exist_ok=True)
         self.port = port
         self.host = host
         self.remote = not config.is_loopback(host)   # reachable beyond this computer: Host is not checked
         self.library_id = library_id(self.library)
+        self.gate: Any = None   # web/auth.Gate: the password of a server reachable over the network
         self.csrf = form_secret(self.library)
         self.shell = Shell(self.csrf)
         self.lock = threading.Lock()
@@ -89,6 +90,9 @@ class App:
         self.on_quit: Any = None                 # set by the runner (tray / console)
         self._rebuild_timer: threading.Timer | None = None
         self._mcp: Any = None
+        if self.remote and password:
+            from .auth import Gate
+            self.gate = Gate(self, password)
 
     # ------------------------------------------------------------------ MCP over HTTP (POST /mcp)
     def mcp_dispatcher(self) -> Any:
@@ -452,11 +456,41 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         self.send_body(405, b"method not allowed", "text/plain", {"Allow": "POST" if self.path.startswith("/mcp") else "GET, POST"})
 
+    def authed(self) -> bool:
+        """A request of a signed-in browser (or of nobody to ask: this computer only, LDTF_AUTH=off)."""
+        from .auth import COOKIE
+        g = self.app.gate
+        return g is None or g.valid(self.cookie(COOKIE))
+
+    def deny(self, path: str) -> None:
+        """Not signed in: pages go to the login, everything else gets 401."""
+        if self.command in ("GET", "HEAD") and not path.startswith("/api/") and \
+                (self.headers.get("Sec-Fetch-Mode") or "navigate") == "navigate":
+            return self.redirect("/login?" + urllib.parse.urlencode({"next": self.path}), 303)
+        return self.json({"error": "нужно войти: откройте LDTF в браузере и введите пароль"}, 401)
+
+    def token_ok(self) -> bool:
+        return secrets.compare_digest(self.headers.get("X-LDTF-Token") or "", self.app.token)
+
     def do_GET(self) -> None:
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/healthz":   # Docker's health check: alive, nothing else
+            return self.send_body(200, b"ok", "text/plain", {"Cache-Control": "no-store"})
         if not self._local_host():
             return self.send_body(403, b"forbidden", "text/plain")
-        if urllib.parse.urlsplit(self.path).path == "/mcp":   # no server-to-client streams here: POST only
+        if path == "/mcp":   # no server-to-client streams here: POST only
             return self.send_body(405, b"POST only", "text/plain", {"Allow": "POST"})
+        if self.app.gate is not None:
+            from .auth import Gate, login_page
+            if path == "/login":
+                nxt = (urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("next") or ["/"])[0]
+                if self.authed():
+                    return self.redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else "/", 303)
+                return self.html(login_page(self.app, nxt))
+            if path == "/api/ping" and not self.authed():
+                return self.json({"app": "ldtf", "version": __version__, "library": self.app.library_id})
+            if not (Gate.exempt(path) or self.authed() or (path.startswith("/api/") and self.token_ok())):
+                return self.deny(path)
         self.start_request()
         u = urllib.parse.urlsplit(self.path)
         path, q = u.path, urllib.parse.parse_qs(u.query)
@@ -607,6 +641,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.mcp_post()
         if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
             return self.api_post()
+        if self.app.gate is not None:
+            if urllib.parse.urlsplit(self.path).path == "/login":
+                from .auth import handle_login
+                return handle_login(self, self.app)
+            if not self.authed():
+                return self.deny(urllib.parse.urlsplit(self.path).path)
         self.start_request()
         mm = re.match(r"/u/([^/]+)/", urllib.parse.urlsplit(self.path).path)
         if mm:
@@ -813,9 +853,9 @@ class Runtime:
     `port`: None takes DEFAULT_PORT or the next free one; a port given explicitly is used as is (Docker, servers)."""
 
     def __init__(self, library: Path, port: int | None = None, scheduler_delay: float = 10.0,
-                 host: str = "127.0.0.1"):
+                 host: str = "127.0.0.1", password: str | None = None):
         self.port = port if port else _free_port(DEFAULT_PORT, host)
-        self.app = App(library, self.port, host)
+        self.app = App(library, self.port, host, password)
         self.app.scheduler.first_delay = scheduler_delay
         Handler.app = self.app
         self.httpd = Server((host, self.port), Handler)
@@ -924,8 +964,17 @@ def serve(library: Path, port: int | None = None, open_browser: bool = False, au
     if problem:
         log.error(problem)
         return 1
+    password = config.password()
+    if not config.is_loopback(host):
+        if not password and not config.auth_off():
+            log.error(f"LDTF не будет слушать {host} без пароля: тогда архивы видел бы любой в сети. Задайте пароль — "
+                      f"переменная LDTF_PASSWORD (или LDTF_PASSWORD_FILE). Если вход уже проверяет прокси перед LDTF, "
+                      f"задайте LDTF_AUTH=off.")
+            return 1
+        if not password:
+            log.warning("[app] вход без пароля (LDTF_AUTH=off): доступ к LDTF должен проверять прокси перед ним")
     try:
-        rt = Runtime(library, port, scheduler_delay=10.0, host=host).start(scheduler=auto_sync)
+        rt = Runtime(library, port, scheduler_delay=10.0, host=host, password=password).start(scheduler=auto_sync)
     except OSError as e:
         log.error(port_problem(host, port, e))
         return 1

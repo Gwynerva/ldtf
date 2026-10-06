@@ -1,0 +1,6 @@
+# the image needs the app only: everything else stays out of the build context
+*
+!dtf_backup
+!LICENSE
+**/__pycache__
+**/*.pyc

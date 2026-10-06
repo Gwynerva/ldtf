@@ -24,8 +24,9 @@ Progress = Callable[[str, int, int], None]
 STUB = """<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Архив DTF · LDTF</title>
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:640px;margin:60px auto;padding:0 16px}</style></head><body>
 <h1>Архив DTF</h1>
-<p>Этот архив открывается в приложении LDTF: запустите <b>LDTF.cmd</b> в папке приложения (на две папки выше).
-Откроется браузер со всеми сохранёнными материалами, поиском и медиа.</p>
+<p>Этот архив открывается в приложении LDTF: запустите <b>LDTF.exe</b> в папке приложения (на две папки выше)
+или откройте адрес, где работает LDTF (Docker, сервер). Откроется браузер со всеми сохранёнными материалами, поиском
+и медиа.</p>
 <p>Без приложения: тексты в Markdown лежат в папке <code>md/</code>,
 данные для скриптов — в <code>data/</code> (описание — в <code>README.md</code>).</p>
 </body></html>
