@@ -17,6 +17,8 @@ Also useful for agents (plain SQL):
   comment_loc(id, ym, page)                              where each owner's comment is shown
   history(id, kind, item_id, entry_id, at, event, state, version_date, sig, body)   versions and removals (history.py):
       kind = post | comment; event = edit (body = the replaced version, zlib JSON) | removed (state = why) | restored
+  post_blocks(post_id, idx, type, level)                every block of every post: level = full | generic |
+      unsupported (blocks.block_level: how LDTF shows the type); the "Блоки DTF" page and the archive's block check
   search_docs(id, kind, ref, entry, date, author, title, body)   texts for search; kind: p = post,
       c = comment of the archive's user, o = other people's comment (ref = post/comment id)
   fts(kind, ref, entry, date, title, body, title_s, body_s)     FTS5 over search_docs (+ stemmed columns);
@@ -37,6 +39,7 @@ from typing import Any, Callable
 
 from . import __version__
 from . import history as hist
+from .blocks import block_level
 from .context import ancestors, index_tree, keep_ids
 from .normalize import MediaResolver, comment_text, html_to_text, media_info
 from .reactions import reaction_pairs, reactions_total
@@ -71,6 +74,8 @@ CREATE TABLE history (id INTEGER PRIMARY KEY, kind TEXT, item_id INTEGER, entry_
     state TEXT, version_date INTEGER, sig TEXT, body BLOB);
 CREATE INDEX history_item ON history(kind, item_id, at);
 CREATE INDEX history_at ON history(at);
+CREATE TABLE post_blocks (post_id INTEGER, idx INTEGER, type TEXT, level TEXT, PRIMARY KEY (post_id, idx));
+CREATE INDEX post_blocks_type ON post_blocks(type);
 """
 
 Progress = Callable[[str, int, int], None]
@@ -387,6 +392,9 @@ def build_view(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: Me
                     pack(p), (p.get("_site") or {}).get("state"), post_donations(p), p.get("_statsAt"), 1 + edits,
                     events))
         index.add("p", p["id"], p["id"], p.get("date") or 0, ds.uid, p.get("title") or "", post_plain_text(p))
+        db.executemany("INSERT OR REPLACE INTO post_blocks VALUES (?,?,?,?)",
+                       [(p["id"], i, t, block_level(t)) for i, t in
+                        enumerate(str(b.get("type") or "?") if isinstance(b, dict) else "?" for b in p.get("blocks") or [])])
     step("build-posts", 1, 1)
 
     # comments: trees + threads first, then the owner's feed (fresher copies, month assignment)

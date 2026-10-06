@@ -307,6 +307,7 @@ class Shell:
             items.append('<hr class="menu-div">')
         items.append(menu_item("Добавить пользователя", "person_add", "/add", on=active == "add"))
         items.append(menu_item("Все архивы", "inventory_2", "/archives", on=active == "archives"))
+        items.append(menu_item("Блоки DTF", "widgets", "/blocks", on=active == "blocks"))
         items.append(menu_item("Настройки приложения", "settings", "/app", on=active in APP_PAGES))
         acct = (f'<details class="acct"><summary title="Сменить архив" aria-label="Сменить архив">{who}'
                 f'<span class="acct-name">{label}</span>{icon("unfold_more")}</summary>'

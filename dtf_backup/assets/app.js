@@ -541,6 +541,7 @@
     var id; try { id = decodeURIComponent(hash.slice(1)); } catch (e) { id = hash.slice(1); }
     var el = document.getElementById(id);
     if (!el) return;
+    if (el.classList.contains("blk-a")) el = el.parentElement;   // a post's own anchor sits inside its block
     var target = el.classList.contains("c") ? revealComment(el) : el;
     var sp = el.closest("details.spoiler"); if (sp) sp.open = true;
     setTimeout(function () {

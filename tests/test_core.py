@@ -177,6 +177,20 @@ class ReactionsTest(unittest.TestCase):
         self.assertEqual(neg.split([(25, 2), (1, 5)]), (5, 2))
         self.assertIn("▼ 2", neg.score_html([(25, 2), (1, 5)], 7))
 
+    def test_block_samples_render(self):
+        """The catalog's sample of every block type renders without an error, at the level blocks.py claims."""
+        from dtf_backup.blocks import TYPE_TITLES, Ctx, Report, block_level, render_block
+        from dtf_backup.blocksamples import demo_resolver, sample_block
+        from dtf_backup.normalize import Linker
+        rep = Report()
+        ctx = Ctx(demo_resolver(), Linker(set(), None), "/", "/", "sample", "sample", rep)
+        for t in TYPE_TITLES:
+            h, md, norm = render_block(sample_block(t), ctx, 0)
+            self.assertNotIn("error", norm, t)
+            self.assertEqual(norm["supported"], {"full": True, "generic": "generic"}[block_level(t)], t)
+            self.assertIn('id="b0"', h)
+        self.assertEqual(rep.buckets["errors"], {})
+
     def test_library_config_and_catalog(self):
         """One dislike list for the library: per-archive lists of LDTF 1.3 move to it once (the newest wins when they
         differ); the catalog joins what every archive saved."""

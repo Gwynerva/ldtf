@@ -41,12 +41,18 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
 
     # ------------------------------------------------------------ posts
     n_pc = 0
+    issues: list[dict] = []   # blocks shown simplified, unknown or failed: the archive's block check
     with open(data / "posts.jsonl", "w", encoding="utf-8") as fp, \
             open(data / "post-comments.jsonl", "w", encoding="utf-8") as fpc:
         for i, p in enumerate(ds.posts):
             pid = p["id"]
             ctx = Ctx(resolver, linker, "/", MD_ROOT, f"post:{pid}", f"post {pid}", report, ds.local_posts)
             _, blocks_md, blocks_norm = render_blocks(p.get("blocks") or [], ctx)
+            for bi, n in enumerate(blocks_norm):
+                if n.get("supported") is not True:
+                    issues.append({"post": pid, "idx": bi, "type": n.get("type"),
+                                   "level": "error" if n.get("error") else
+                                   "generic" if n.get("supported") == "generic" else "unsupported"})
             repost_md, repost_norm = _repost(p, ctx)
             title = p.get("title") or ""
             url = p.get("url") or post_url(pid)
@@ -134,7 +140,7 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
     counts = {"posts": len(ds.posts), "myComments": len(ds.my), "postComments": n_pc, "contextComments": n_ctx,
               "mediaRefs": n_media, "history": n_hist}
     _readme(ds, counts)
-    return {"context": ctx_stats, "counts": counts}
+    return {"context": ctx_stats, "counts": counts, "blockIssues": issues}
 
 
 # ---------------------------------------------------------------------- helpers

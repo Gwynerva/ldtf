@@ -28,6 +28,7 @@ from ..state import META_GUARD, META_LAST_SYNC, Archive, read_meta
 from ..sync import status as status_text
 from ..util import COMMENTS, FILES, POSTS, count_label, human_bytes, log, num, plural, short, ts_date, ts_human
 from .icons import icon
+from .blocks_page import blocks_card
 from .jobs import ACTIVE, CANCELLED, ERROR, JOB_STATES, QUEUED, RUNNING_TITLES, STATE_ICONS
 from .ui import (Links, app_tabs, archive_link, avatar, badge, banner, btn, empty_state, fold, hidden_input, icon_btn,
                  manage_tabs, menu, menu_item, page_head, sec_head, snackbar, stat)
@@ -394,7 +395,7 @@ def settings_page(app: "App", nick: str, notice: str = FLASH, confirm: dict | No
         f'{btn("Удалить архив", "danger", "delete")}</div>', cls="card fgroup danger-zone")
     top = drop_confirm(app, arch, confirm) if confirm else notice
     body = (page_head("Управление архивом") + manage_tabs(L, "settings") + f'<div data-region="notice">{top}</div>' +
-            app.shell.form(L.settings(), inner, cls="settings", autosave=True) +
+            app.shell.form(L.settings(), inner, cls="settings", autosave=True) + blocks_card(arch) +
             f'<section class="danger-sec">{sec_head("Опасная зона")}{danger}</section>')
     return app.page("Настройки", body, nick, active="settings")
 

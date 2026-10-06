@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .media import collect_media
+from .util import ts_human
 from .web.icons import icon
 from .normalize import (EXT_LINK, Linker, MediaResolver, convert_html, external_video_url, media_info,
                         media_src, post_ref, unwrap_url)
@@ -354,6 +355,64 @@ def b_person(d: dict, ctx: Ctx) -> Result:
     return h, md, {"name": tt, "description": dt, "image": media_norm(img)}
 
 
+def _duration(sec: Any) -> str:
+    try:
+        s = int(round(float(sec)))
+    except (TypeError, ValueError):
+        return ""
+    return f"{s // 60}:{s % 60:02d}" if s > 0 else ""
+
+
+def b_audio(d: dict, ctx: Ctx) -> Result:
+    """An uploaded audio file (mp3): player, cover, title, duration."""
+    au = d.get("audio") or {}
+    m = media_info(au, ctx.resolver)
+    if not m:
+        raise ValueError("audio без файла")
+    m["kind"] = "audio"
+    info = (au.get("data") or {}).get("audio_info") or {} if isinstance(au.get("data"), dict) else {}
+    title_h, title_md, title_t = rich(d.get("title"), ctx) if d.get("title") else ("", "", "")
+    name = title_t or (au.get("data") or {}).get("filename") or "Аудио"
+    cover = media_info(d.get("image"), ctx.resolver) if d.get("image") else None
+    dur = _duration(info.get("duration"))
+    pic = f'<span class="au-cover">{media_html(cover, ctx, link=False)}</span>' if cover else \
+        f'<span class="au-cover au-none">{icon("graphic_eq")}</span>'
+    h = (f'<div class="b-audio">{pic}<div class="au-body"><div class="au-title">{title_h or E(name)}</div>'
+         f'<div class="au-meta">{E(dur) + " · " if dur else ""}{E(str(info.get("format") or "mp3"))}</div>'
+         f'{media_html(m, ctx)}</div></div>')
+    md = media_md(m, ctx, name)
+    return h, md, {"title": title_t or None, "audio": media_norm(m), "duration": info.get("duration"),
+                   "cover": media_norm(cover)}
+
+
+def b_telegram(d: dict, ctx: Ctx) -> Result:
+    """A post from a Telegram channel, as DTF saved it: author, text, pictures, link to t.me."""
+    tg = d.get("telegram") or {}
+    td = ((tg.get("data") or {}).get("tg_data") if isinstance(tg.get("data"), dict) else None) or tg.get("tg_data") or {}
+    if not td:
+        raise ValueError("telegram без tg_data")
+    url = td.get("url") or ""
+    author = td.get("author") or {}
+    text_h, text_md, text_t = rich(td.get("text"), ctx)
+    media = all_media({"photos": td.get("photos"), "videos": td.get("videos")}, ctx)
+    thumbs = "".join(media_html(m, ctx) for m in media[:6])
+    av = author.get("avatar_url")
+    when = td.get("datetime")
+    h = (f'<div class="b-tg"><div class="tg-head">'
+         + (f'<img class="av tg-av" src="{E(av)}" alt="" loading="lazy" data-remote="avatar">' if av else
+            f'<span class="av0 tg-av">{icon("person")}</span>') +
+         f'<div class="tg-who"><b>{E(author.get("name") or "Telegram")}</b>'
+         f'<span>Telegram{" · " + ts_human(when) if when else ""}</span></div>'
+         + (f'<a class="icon-btn" href="{E(url)}"{EXT_LINK} title="Открыть в Telegram" aria-label="Открыть в Telegram">'
+            f'{icon("open_in_new")}</a>' if url else "") +
+         f'</div><div class="tg-text">{text_h}</div>'
+         f'{f"<div class=\"g-media pswp-gallery\">{thumbs}</div>" if thumbs else ""}</div>')
+    md = f"> **{author.get('name') or 'Telegram'}** (Telegram)\n>\n" + "\n".join("> " + x for x in text_md.split("\n")) + \
+        (f"\n>\n> {url}" if url else "")
+    return h, md, {"url": url or None, "author": author.get("name"), "text": text_t, "date": when,
+                   "media": [media_norm(m) for m in media]}
+
+
 def b_button(d: dict, ctx: Ctx) -> Result:
     url = d.get("url") or d.get("link") or d.get("href")
     if isinstance(url, dict):
@@ -422,13 +481,33 @@ FULL: dict[str, Callable[[dict, Ctx], Result]] = {
     "text": b_text, "header": b_header, "list": b_list, "quote": b_quote, "incut": b_incut,
     "delimiter": b_delimiter, "media": b_media, "video": b_video, "link": b_link,
     "osnovaEmbed": b_osnova_embed, "code": b_code, "quiz": b_quiz, "person": b_person,
+    "audio": b_audio, "telegram": b_telegram,
 }
 # Known from the DTF web bundle, but without real samples in the archive yet.
 PARTIAL: dict[str, Callable[[dict, Ctx], Result]] = {
     "special_button": b_button, "telegram_button": b_button, "rawhtml": b_rawhtml,
 }
-GENERIC_TYPES = ("tweet", "telegram", "instagram", "tiktok", "yamusic", "spotify", "game", "audio", "number",
-                 "embed", "movie")
+GENERIC_TYPES = ("tweet", "instagram", "tiktok", "yamusic", "spotify", "game", "number", "embed", "movie")
+# what the editor of DTF can put into a post (its web bundle) and the older types seen in posts; the "Блоки DTF" page
+# shows every one of them
+TYPE_TITLES = {
+    "text": "Текст", "header": "Заголовок", "list": "Список", "quote": "Цитата", "incut": "Врезка",
+    "delimiter": "Разделитель", "media": "Картинки и галереи", "video": "Видео", "audio": "Аудио",
+    "link": "Ссылка", "osnovaEmbed": "Пост DTF", "code": "Код", "quiz": "Опрос", "person": "Персона",
+    "telegram": "Пост из Telegram", "special_button": "Кнопка", "telegram_button": "Кнопка Telegram",
+    "rawhtml": "HTML-вставка", "tweet": "Твит", "instagram": "Instagram", "tiktok": "TikTok",
+    "yamusic": "Яндекс Музыка", "spotify": "Spotify", "game": "Карточка игры", "number": "Число",
+    "embed": "Встраивание (старый формат)", "movie": "Фильм (старый формат)",
+}
+
+
+def block_level(t: str) -> str:
+    """full | generic (shown simplified: texts, links, media + the JSON) | unsupported (unknown to LDTF)."""
+    if t in FULL:
+        return "full"
+    if t in PARTIAL or t in GENERIC_TYPES:
+        return "generic"
+    return "unsupported"
 
 
 def unsupported_html(t: str, block: Any, ctx: Ctx, error: str | None = None) -> str:
@@ -446,8 +525,8 @@ def unsupported_md(t: str, block: Any, error: str | None = None) -> str:
     return f"> ⚠ `{t}`: {why}\n\n```json\n{json.dumps(block, ensure_ascii=False, indent=2)}\n```"
 
 
-def render_block(b: Any, ctx: Ctx) -> tuple[str, str, dict]:
-    """-> (html, markdown, normalized). Never raises."""
+def render_block(b: Any, ctx: Ctx, idx: int | None = None) -> tuple[str, str, dict]:
+    """-> (html, markdown, normalized). Never raises. `idx`: the block's place in the post, its anchor (#b3)."""
     if not isinstance(b, dict):
         ctx.report.add("unsupported", f"<{type(b).__name__}>", ctx.where)
         return unsupported_html("?", b, ctx), unsupported_md("?", b), {"type": None, "supported": False, "raw": b}
@@ -490,13 +569,17 @@ def render_block(b: Any, ctx: Ctx) -> tuple[str, str, dict]:
     if b.get("hidden"):
         h = f'<details class="spoiler"><summary>{icon("visibility")}Спойлер</summary>{h}</details>'
         md = "<details><summary>Спойлер</summary>\n\n" + md + "\n\n</details>"
+    if idx is not None:   # the post's own anchor (tables of contents link to it) stays inside
+        return (f'<div class="blk blk-{E(t)}" id="b{idx}">{f"<span class=blk-a{anchor}></span>" if anchor else ""}{h}</div>',
+                md, out)
     return f'<div class="blk blk-{E(t)}"{anchor}>{h}</div>', md, out
 
 
-def render_blocks(blocks: list[Any], ctx: Ctx) -> tuple[str, str, list[dict]]:
+def render_blocks(blocks: list[Any], ctx: Ctx, ids: bool = False) -> tuple[str, str, list[dict]]:
+    """`ids`: every block gets an anchor by its place (#b0, #b1, ...): the post page, so links can point at a block."""
     hs, mds, norms = [], [], []
-    for b in blocks or []:
-        h, md, n = render_block(b, ctx)
+    for i, b in enumerate(blocks or []):
+        h, md, n = render_block(b, ctx, i if ids else None)
         hs.append(h)
         mds.append(md)
         norms.append(n)

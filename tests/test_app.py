@@ -235,6 +235,32 @@ class AppTest(unittest.TestCase):
                                      (self.arch.root / "data" / "post-comments.jsonl").read_text(encoding="utf-8").splitlines())}
         self.assertEqual((rows[11]["donation"], rows[12]["donationsReceived"]), (300, 50))
 
+    def test_blocks_catalog(self) -> None:
+        """Every block type of the DTF editor is on the catalog page (a real block where an archive has one, else a
+        sample); the archive's settings list the posts with blocks LDTF shows simplified or doesn't know; post blocks
+        have anchors by their place."""
+        from dtf_backup.blocks import TYPE_TITLES
+        code, body, _ = self.get("/blocks")
+        self.assertEqual(code, 200)
+        for t in TYPE_TITLES:
+            self.assertIn(f'id="t-{t}"', body, t)
+        self.assertIn('id="t-futureBlock"', body)              # unknown to LDTF, found in an archive
+        self.assertIn("Настоящий блок из поста", body)
+        self.assertNotIn("Не удалось отобразить", body)
+        self.assertIn("/assets/samples/sample-1.svg", body)     # samples work offline
+        code, body, _ = self.get("/blocks?f=unsupported")
+        self.assertIn('id="t-futureBlock"', body)
+        self.assertNotIn('id="t-text"', body)
+        code, body, _ = self.get("/blocks?f=used&a=tester")
+        self.assertIn('id="t-text"', body)
+        self.assertNotIn('id="t-tweet"', body)
+        code, body, _ = self.get("/u/tester/settings")
+        self.assertIn("Проверка блоков", body)
+        self.assertIn(f'/u/tester/p/{OWN_POST}#b2', body)        # straight to the unknown block
+        code, body, _ = self.get(f"/u/tester/p/{OWN_POST}")
+        self.assertIn('id="b0"', body)
+        self.assertIn('id="b2"', body)
+
     def test_shell(self) -> None:
         import re
         ck = {"Cookie": "last=tester"}
@@ -248,7 +274,8 @@ class AppTest(unittest.TestCase):
             return re.sub(r' (on|aria-current=page)(?=[">\s])|<svg[^>]*>.*?</svg>', "", h.group(0))
 
         pages = ["/u/tester/", "/u/tester/c/2026-09", "/u/tester/search?q=катана", "/u/tester/sync", "/archives",
-                 "/add", "/diagnostics", "/nope"]
+                 "/add", "/diagnostics", "/nope", "/blocks", "/app", "/app/reactions", "/u/tester/donations",
+                 "/u/tester/changes"]
         heads = {p: header(p) for p in pages}
         for p in pages:
             self.assertEqual(heads[p], heads["/u/tester/"], f"app bar differs on {p}")
@@ -468,7 +495,7 @@ class AppTest(unittest.TestCase):
     def test_no_emoji_chrome(self) -> None:
         for p in ["/u/tester/", "/u/tester/posts", f"/u/tester/p/{OWN_POST}", "/u/tester/comments", "/u/tester/c/2026-09",
                   "/u/tester/search?q=катана", "/app/reactions", "/u/tester/sync", "/u/tester/settings", "/archives",
-                  "/add", "/diagnostics"]:
+                  "/add", "/diagnostics", "/blocks", "/app", "/u/tester/donations", "/u/tester/changes"]:
             _, body, _ = self.get(p)
             for ch in "📝📄💬🔖🔁⟳■✓✗↗▸▾↳📎📊📁⚠♥":
                 self.assertNotIn(ch, body, f"{ch} on {p}")

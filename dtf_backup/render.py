@@ -53,7 +53,7 @@ def render(arch: Archive, progress: Progress | None = None) -> dict:
     rep = {"renderedAt": _dt.datetime.now(MSK).isoformat(timespec="seconds"), "toolVersion": __version__,
            "unsupported": report.buckets["unsupported"], "generic": report.buckets["generic"],
            "errors": report.buckets["errors"], "unknownReactions": report.buckets["unknownReactions"],
-           "context": res["context"], "counts": res["counts"]}
+           "context": res["context"], "counts": res["counts"], "blockIssues": res["blockIssues"]}
     write_json(arch.report_path, rep)
     log.info(f"[render] готово за {time.time() - t0:.0f} с")
     if report.buckets["unsupported"] or report.buckets["errors"]:

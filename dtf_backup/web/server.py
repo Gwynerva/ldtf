@@ -42,7 +42,7 @@ from ..scope import comments_kept, pending_drop
 from ..state import META_GUARD, Archive, archive_dirs, gc_pending, peek_meta
 from ..util import atomic_write_text, log, read_json_gz, write_json
 from ..viewdb import open_view, view_meta, view_outdated, view_ready
-from . import app_pages, history_pages, insights, viewer
+from . import app_pages, blocks_page, history_pages, insights, viewer
 from .jobs import KINDS, RUNNING, JobManager
 from .ui import ASSETS, Links, Shell, avatar_src, btn, empty_state
 
@@ -175,6 +175,13 @@ class App:
 
     def account(self, nick: str) -> dict | None:
         return next((a for a in self.accounts() if a["nick"] == nick), None)
+
+    def view_stamp(self, nick: str) -> float:
+        a = self.archive(nick)
+        try:
+            return a.view_path.stat().st_mtime if a else 0.0
+        except OSError:
+            return 0.0
 
     def view(self, nick: str) -> viewer.ArchiveView | None:
         arch = self.archive(nick)
@@ -455,6 +462,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.html(app_pages.app_settings_page(self.app))
             if path == "/app/reactions":
                 return self.html(app_pages.app_reactions_page(self.app))
+            if path == "/blocks":
+                stamp = tuple(self.app.view_stamp(d.name) for d in archive_dirs(self.app.library))
+                key = ("", "/blocks", qs("f"), qs("a"), stamp)
+                return self.html(self.app.cached(key, lambda: blocks_page.page_blocks(self.app, qs("f"), qs("a"))))
             m = re.fullmatch(r"/u/([^/]+)(/.*)?", path)
             if m:
                 return self.archive_get(urllib.parse.unquote(m.group(1)), m.group(2) or "/", qs, q)

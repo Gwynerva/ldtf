@@ -211,7 +211,7 @@ def page_post(v: ArchiveView, pid: int) -> tuple[str, str] | None:
         return None
     p = unpack(row["raw"])
     ctx = v.ctx(f"post:{pid}", f"post {pid}")
-    blocks_h, _, _ = render_blocks(p.get("blocks") or [], ctx)
+    blocks_h, _, _ = render_blocks(p.get("blocks") or [], ctx, ids=True)
     repost_h = _repost_html(v, p, ctx)
     items = [unpack(r[0]) for r in db.execute("SELECT data FROM comments WHERE entry_id=? AND own_post=1", (pid,))]
     by_id, children = index_tree(items)
