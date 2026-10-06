@@ -48,7 +48,7 @@ class SigTest(unittest.TestCase):
     def test_word_diff(self) -> None:
         h = history.word_diff("Кот спит на <окне>", "Кот спал на <окне> днём")
         self.assertIn("<del>спит</del><ins>спал</ins>", h)
-        self.assertIn("<ins> днём</ins>", h)
+        self.assertIn(" <ins>днём</ins>", h)
         self.assertIn("&lt;окне&gt;", h)
         ops = history.block_ops([{"t": 1}, {"t": 2}, {"t": 3}], [{"t": 1}, {"t": 4}, {"t": 3}, {"t": 5}])
         self.assertEqual([o[0] for o in ops], ["equal", "replace", "equal", "insert"])

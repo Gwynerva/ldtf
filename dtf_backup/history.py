@@ -243,23 +243,55 @@ def body(row: Any) -> dict | None:
 
 
 # ---------------------------------------------------------------------- diffs (pages)
-_WORD = re.compile(r"\s+|[^\s]+")
+_WORD = re.compile(r"\s*\S+|\s+")   # a word with the spaces before it: changes read as whole words
+
+
+def diff_runs(a: str, b: str) -> list[tuple[str, str, str]]:
+    """[(op, old text, new text)], op = equal | change. A short unchanged stretch between two changes (a word or
+    two) joins them, so an edit reads as one phrase instead of a patchwork."""
+    ta, tb = _WORD.findall(a or ""), _WORD.findall(b or "")
+    runs: list[list] = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
+        kind = "equal" if op == "equal" else "change"
+        if runs and runs[-1][0] == kind:
+            runs[-1][1] += "".join(ta[i1:i2])
+            runs[-1][2] += "".join(tb[j1:j2])
+        else:
+            runs.append([kind, "".join(ta[i1:i2]), "".join(tb[j1:j2])])
+    merged: list[list] = []
+    for i, r in enumerate(runs):
+        short = r[0] == "equal" and 0 < i < len(runs) - 1 and len(r[1].split()) <= 1
+        if short or (r[0] == "change" and merged and merged[-1][0] == "change"):
+            merged[-1][1] += r[1]
+            merged[-1][2] += r[2]
+        else:
+            merged.append(list(r))
+    return [(k, x, y) for k, x, y in merged]
 
 
 def word_diff(a: str, b: str) -> str:
-    """HTML of `b` with what changed since `a`: <del>removed</del> <ins>added</ins> (escaped text)."""
-    ta, tb = _WORD.findall(a or ""), _WORD.findall(b or "")
+    """HTML of `b` with what changed since `a`: <del>removed</del><ins>added</ins> (escaped text)."""
     out: list[str] = []
-    sm = difflib.SequenceMatcher(None, ta, tb, autojunk=False)
-    for op, i1, i2, j1, j2 in sm.get_opcodes():
+    for op, x, y in diff_runs(a, b):
         if op == "equal":
-            out.append(E("".join(ta[i1:i2])))
+            out.append(E(y))
             continue
-        if op in ("delete", "replace"):
-            out.append(f'<del>{E("".join(ta[i1:i2]))}</del>')
-        if op in ("insert", "replace"):
-            out.append(f'<ins>{E("".join(tb[j1:j2]))}</ins>')
+        lead, x, y = split_lead(x, y)
+        out.append(E(lead))
+        if x.strip():
+            out.append(f"<del>{E(x)}</del>")
+        if y.strip():
+            out.append(f"<ins>{E(y)}</ins>")
+        elif not x.strip():
+            out.append(E(y))
     return "".join(out)
+
+
+def split_lead(x: str, y: str) -> tuple[str, str, str]:
+    """The spaces before a changed phrase stay outside its highlight."""
+    src = x if x.strip() else y
+    lead = src[:len(src) - len(src.lstrip())]
+    return lead, x[len(lead):] if x.startswith(lead) else x, y[len(lead):] if y.startswith(lead) else y
 
 
 def block_ops(old: list, new: list) -> list[tuple[str, list[int], list[int]]]:
@@ -287,7 +319,7 @@ def summary(old: list, new: list, title_changed: bool = False) -> str:
     if chg:
         parts.append(f"изменено блоков: {chg}")
     if add:
-        parts.append(f"добавлено: {add}")
+        parts.append(f"добавлено блоков: {add}")
     if rem:
-        parts.append(f"удалено: {rem}")
+        parts.append(f"удалено блоков: {rem}")
     return ", ".join(parts) or "оформление"

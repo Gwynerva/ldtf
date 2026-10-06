@@ -452,7 +452,8 @@ figcaption, .gallery-title { margin-top: 8px; text-align: center; font-size: 14p
 .g-media { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .g-media .thumb, .g-media img { max-width: 160px; max-height: 120px; border-radius: var(--r-sm); }
 details.json { margin-top: 8px; }
-details.json > summary { cursor: pointer; color: var(--primary); font-size: 14px; }
+details.json > summary { display: flex; align-items: center; min-height: 32px; cursor: pointer; color: var(--primary);
+  font-size: 14px; }
 details.json pre { margin: 8px 0 0; padding: 12px; max-height: 480px; overflow: auto; border-radius: var(--r-sm);
   background: var(--sc-high); color: var(--on-surface); font-size: 12px; }
 details.spoiler { padding: 0 16px; border-radius: var(--r-md); background: var(--sc-low); box-shadow: inset 0 0 0 1px var(--outline-variant); }
@@ -602,7 +603,7 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--mark); color: inher
 .bcheck .fold .list { margin: 0 -12px; }
 
 /* ======================================================================= history (versions, diffs, changes) */
-a.mi.hist-link { color: var(--primary); font-weight: 500; }
+a.mi.hist-link { margin: -6px -8px; padding: 6px 8px; color: var(--primary); font-weight: 500; }   /* a bigger target */
 a.mi.hist-link:hover { text-decoration: none; background: var(--hover-primary); border-radius: var(--r-full);
   box-shadow: 0 0 0 4px var(--hover-primary); }
 a.c-ed.c-hist { gap: 2px; padding: 0 6px 0 4px; border-radius: var(--r-full); color: var(--primary); font-size: 12px;
@@ -679,6 +680,7 @@ a.cnt.don:hover { text-decoration: none; background: color-mix(in srgb, var(--on
 .c-don-only .c-h { min-height: 32px; }
 .don-sum { margin-bottom: 8px; padding: 16px; }
 .don-li { min-height: 64px; }
+.don-li .li-t { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .don-li .av, .don-li .av0 { --s: 40px; }
 .don-amt { flex: none; min-width: 96px; color: var(--don); font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums;
   white-space: nowrap; }
@@ -1119,7 +1121,13 @@ a.badge { text-decoration: none; }
   .dblk { margin: 12px -8px; padding: 4px 8px; }
   .seg-links { display: flex; width: 100%; }
   .seg-links a { flex: 1 1 0; justify-content: center; padding: 0 8px; }
-  .don-li:not(:has(.av, .av0)) { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .don-li:not(:has(.av, .av0)) { flex-direction: column; align-items: stretch; gap: 2px; }
+  .don-sum .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chips.scroll.filters, .chips.scroll.bt-toc { margin-bottom: 12px; }
+  /* sorting of posts: four segments are wider than a phone, the bar scrolls (like the filter chips) */
+  .toolbar { flex-wrap: nowrap; overflow-x: auto; margin: 0 calc(-1 * var(--gutter)) 8px; padding: 2px var(--gutter);
+    scrollbar-width: none; }
+  .toolbar::-webkit-scrollbar { display: none; }
   .don-c { padding: 12px; }
   .rx-cell { padding: 12px 4px 8px; font-size: 12px; }
   .rx-cell img, .rx-cell .rx-q { width: 36px; height: 36px; }

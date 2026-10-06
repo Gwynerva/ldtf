@@ -7,7 +7,6 @@ to get the rest (page / limit / offset). Media are linked on DTF's CDN, links po
 from __future__ import annotations
 
 import datetime as _dt
-import difflib
 import html
 import json
 import re
@@ -21,6 +20,7 @@ from ..api import comment_url, post_url
 from ..blocks import Ctx, Report, render_blocks
 from ..context import ancestors, descendants, index_tree
 from ..guard import state_title
+from ..history import diff_runs, split_lead
 from ..normalize import Linker, MediaResolver, comment_text
 from ..reactions import Reactions
 from ..search.engine import has_index, search
@@ -30,7 +30,6 @@ from ..viewdb import open_view, post_plain_text, view_meta
 
 MAX_CHARS = 60_000
 TAG_RE = re.compile(r"<[^>]+>")
-WORD_RE = re.compile(r"\s+|[^\s]+")
 
 
 class ToolError(Exception):
@@ -61,17 +60,13 @@ def _cut(text: str, hint: str = "") -> str:
 
 def _diff_text(a: str, b: str, keep: int = 160) -> str:
     """What changed between two texts: [-removed-] {+added+}, long unchanged stretches shortened to their ends."""
-    ta, tb = WORD_RE.findall(a or ""), WORD_RE.findall(b or "")
     out: list[str] = []
-    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ta, tb, autojunk=False).get_opcodes():
+    for op, x, y in diff_runs(a, b):
         if op == "equal":
-            same = "".join(ta[i1:i2])
-            out.append(same if len(same) <= 2 * keep else same[:keep] + " … " + same[-keep:])
+            out.append(y if len(y) <= 2 * keep else y[:keep] + " … " + y[-keep:])
             continue
-        if op in ("delete", "replace"):
-            out.append("[-" + "".join(ta[i1:i2]) + "-]")
-        if op in ("insert", "replace"):
-            out.append("{+" + "".join(tb[j1:j2]) + "+}")
+        lead, x, y = split_lead(x, y)
+        out.append(lead + (f"[-{x}-]" if x.strip() else "") + (f"{{+{y}+}}" if y.strip() else ""))
     return "".join(out)
 
 

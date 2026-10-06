@@ -123,7 +123,7 @@ def page_blocks(app: "App", flt: str, only: str) -> str:
             f'<div class="bt-sample"><div class="bt-label">{label}</div><div class="bt-body">{shown}</div></div>'
             f'<div class="bt-foot">{count}{ex}'
             f'{fold("Исходные данные блока", json_spoiler(raw, "JSON"), "fold bt-json")}</div></section>')
-        toc.append(f'<a class="chip" href="#t-{E(t)}">{icon(ic, cls="lv-" + level)}{E(title)}'
+        toc.append(f'<a class="chip" href="#t-{E(t)}">{icon(ic, cls="lv-" + level)}{E(TYPE_TITLES.get(t) or t)}'
                    f'{f"<span class=n>{num(u["n"])}</span>" if u else ""}</a>')
 
     def chip(label: str, on: bool, href: str) -> str:
@@ -140,7 +140,7 @@ def page_blocks(app: "App", flt: str, only: str) -> str:
     if not cards:
         body += empty_state("widgets", "Таких блоков нет", "Уберите фильтр, чтобы увидеть все.")
     else:
-        body += f'<nav class="chips bt-toc" aria-label="Типы блоков">{"".join(toc)}</nav>' + "".join(cards)
+        body += f'<nav class="chips scroll bt-toc" aria-label="Типы блоков">{"".join(toc)}</nav>' + "".join(cards)
     return app.page("Блоки DTF", body, active="blocks", wide=True)
 
 
