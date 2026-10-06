@@ -62,7 +62,15 @@ reactions{counters[{id,count}]}, replyCount, isRemoved, isRemovedByModerator, is
   `video` — внешнее (`external_service {name, id}` + `thumbnail`), `link` — карточка ссылки.
 
 **Пост**: `id, date, dateModified, title, url, subsiteId, author, subsite, counters{comments,favorites,reposts…},
-reactions, repostId, repostData{type,data{original_id,title,blocks,author…}}, blocks[]`.
+reactions, donations{amount, isDonated}, gifts[], repostId, repostData{type,data{original_id,title,blocks,author…}},
+blocks[]`. `donations.amount` — рубли, которые читатели задонатили посту (сумма самого DTF; у постов примерно до 2023
+года — 0, хотя донат-комментарии под ними есть). Элемент ленты `timeline` несёт те же `counters`, `reactions` и
+`donations`, что и `content`, — свежие при каждом запросе; инструмент берёт их оттуда (`posts.stats` в
+`state.sqlite`), а пост целиком перекачивает только после правки.
+
+**Донаты в комментариях:** `donation` — рубли, отправленные автору поста вместе с этим комментарием (донат-комментарий;
+текст может быть пустым), `donations{amount, isDonated}` — сколько задонатили самому комментарию, `donate` — всегда
+`null`.
 
 **Блоки редактора** (`blocks[] = {type, data, cover, hidden, anchor}`):
 - `hidden: true` — **спойлер**; `cover: true` — блок показывается в ленте; `anchor` — id для оглавлений (`#anchor`).
