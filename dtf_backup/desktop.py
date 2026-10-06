@@ -114,6 +114,7 @@ class TrayUI:
         self.tray = traymod.Tray(self.status, self.menu, lambda: open_ui(), on_end_session=lambda: rt.stop(5))
         self.app.on_quit = self.quit
         self.app.finish_listeners.append(self.job_finished)
+        self.app.updater.notify = lambda title, text: self.tray.notify(title, text, lambda: open_ui("app#upd"))
 
     # ------------------------------------------------------------------ state
     def _next_sync(self) -> tuple[str, float] | None:
@@ -161,6 +162,9 @@ class TrayUI:
         if win.available():
             items.append(tm.MenuItem("Запускать вместе с Windows", self.toggle_autostart,
                                      checked=win.autostart_state() in win.OWN_ENTRY))
+        if self.app.updater.available():
+            v = (self.app.updater.latest or {}).get("version")
+            items.append(tm.MenuItem(f"Обновить LDTF до {v}…", lambda: self.open_ui("app#upd")))
         items += [tm.MenuItem("Настройки…", lambda: self.open_ui("app")), tm.SEP,
                   tm.MenuItem("Остановить LDTF", self.quit)]
         return items

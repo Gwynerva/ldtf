@@ -549,6 +549,32 @@
       flash(target);
     }, 60);
   }
+  // ---- updates (settings): follow the download and the install; the restarted app reloads the page
+  var upd = document.getElementById("upd");
+  if (upd && /^(checking|downloading|waiting|installing)$/.test(upd.getAttribute("data-upd"))) {
+    var cur = upd.getAttribute("data-version"), gone = 0;
+    var tick = function () {
+      var st = upd.getAttribute("data-upd");
+      if (st === "installing") {   // the app quits, the helper swaps the files, the new version comes up
+        fetch("/api/ping", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (p) {
+          if (p.version && p.version !== cur) location.reload(); else setTimeout(tick, 1500);
+        }, function () {
+          gone += 1;
+          if (gone === 60) snack("LDTF пока не отвечает — обновление ещё идёт или не удалось. Обновите страницу позже.", true);
+          setTimeout(tick, 1500);
+        });
+        return;
+      }
+      fetch("/api/update", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (s) {
+        if (s.state !== st) { if (s.state === "installing") { upd.setAttribute("data-upd", "installing"); setTimeout(tick, 500); } else location.reload(); return; }
+        var bar = upd.querySelector(".lp-i"), pct = upd.querySelector(".upd-pct");
+        if (s.progress != null && bar) { bar.parentNode.classList.remove("ind"); bar.style.width = s.progress + "%"; if (pct) pct.textContent = " " + s.progress + "%"; }
+        setTimeout(tick, 1000);
+      }, function () { setTimeout(tick, 2000); });
+    };
+    setTimeout(tick, 800);
+  }
+
   // ---- "Копировать" (agents' settings): the clipboard API needs https or localhost; elsewhere select + copy
   document.addEventListener("click", function (e) {
     var b = e.target.closest && e.target.closest("[data-copy]");

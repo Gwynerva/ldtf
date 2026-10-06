@@ -289,7 +289,7 @@ class Shell:
     def __init__(self, csrf: str):
         self.csrf = csrf
 
-    def appbar(self, current: dict | None, accounts: list[dict], active: str) -> str:
+    def appbar(self, current: dict | None, accounts: list[dict], active: str, update: str = "") -> str:
         links = Links(current["nick"]) if current else None
         if current:
             who, label = avatar(current.get("avatar")), E(current["name"])
@@ -309,8 +309,11 @@ class Shell:
         items.append(menu_item("Добавить пользователя", "person_add", "/add", on=active == "add"))
         items.append(menu_item("Все архивы", "inventory_2", "/archives", on=active == "archives"))
         items.append(menu_item("Блоки DTF", "widgets", "/blocks", on=active == "blocks"))
-        items.append(menu_item("Настройки приложения", "settings", "/app", on=active in APP_PAGES))
-        acct = (f'<details class="acct"><summary title="Сменить архив" aria-label="Сменить архив">{who}'
+        items.append(menu_item("Настройки приложения", "settings", "/app", on=active in APP_PAGES)
+                     .replace("</a>", f'<span class="upd-badge" title="Доступна LDTF {E(update)}">{E(update)}</span></a>')
+                     if update else menu_item("Настройки приложения", "settings", "/app", on=active in APP_PAGES))
+        dot = '<span class="upd-dot" aria-hidden="true"></span>' if update else ""
+        acct = (f'<details class="acct"><summary title="Сменить архив" aria-label="Сменить архив">{who}{dot}'
                 f'<span class="acct-name">{label}</span>{icon("unfold_more")}</summary>'
                 f'<div class="menu-pop acct-menu" role="menu">{"".join(items)}</div></details>')
         nav = manage = ""
@@ -327,7 +330,7 @@ class Shell:
                 f'<a class="job-ind" href="/jobs" hidden>{RING}<span class="job-pct"></span></a>{manage}{theme}</div></header>')
 
     def page(self, title: str, body: str, *, current: dict | None, accounts: list[dict], active: str = "",
-             wide: bool = False, extra: str = "", bare: bool = False) -> str:
+             wide: bool = False, extra: str = "", bare: bool = False, update: str = "") -> str:
         """`bare`: without the app bar (the page after LDTF was stopped: its links would lead nowhere)."""
         name = current["name"] if current else ""
         if current and current.get("guard") and active != "sync":   # the sync tab shows the full guard card
@@ -342,7 +345,7 @@ class Shell:
                 f'<script>{THEME_JS}{MEDIA_JS}</script>'
                 f'<link rel="stylesheet" href="{Links.asset("vendor/photoswipe/photoswipe.css")}">'
                 f'<link rel="stylesheet" href="{Links.asset("style.css")}"></head>'
-                f'<body>{"" if bare else self.appbar(current, accounts, active)}'
+                f'<body>{"" if bare else self.appbar(current, accounts, active, update)}'
                 f'<main class="page page--{"wide" if wide else "read"}">{body}</main>'
                 f'{PAGE_TEMPLATES}'
                 f'<script src="{Links.asset("vendor/photoswipe/photoswipe.umd.min.js")}"></script>'

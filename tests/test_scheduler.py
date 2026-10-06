@@ -80,13 +80,14 @@ class SettingsTest(unittest.TestCase):
     def test_app_settings(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             lib = Path(d)
-            self.assertEqual(load_app_settings(lib), {"autosync": True, "notify": True, "open_browser": True})
+            self.assertEqual(load_app_settings(lib), {"autosync": True, "notify": True, "open_browser": True,
+                                                      "update_check": True})
             # values of older versions (the network budget was a setting) are ignored, not an error
             s = save_app_settings(lib, {"max_parallel": "9", "api_rate": "0.2", "notify": "0"})
-            self.assertEqual(s, {"autosync": True, "notify": False, "open_browser": True})
+            self.assertEqual(s, {"autosync": True, "notify": False, "open_browser": True, "update_check": True})
             # one control at a time: a switch that isn't sent keeps its value (never "unchecked = off")
             s = save_app_settings(lib, {"autosync": "0"})
-            self.assertEqual(s, {"autosync": False, "notify": False, "open_browser": True})
+            self.assertEqual(s, {"autosync": False, "notify": False, "open_browser": True, "update_check": True})
             self.assertEqual(load_app_settings(lib), s)
 
     def test_defaults_daily_at_nine(self) -> None:

@@ -413,6 +413,78 @@ def autostart_note(state: str) -> str:
     return ""
 
 
+UPDATE_STEPS = {"checking": "Проверяю, есть ли новая версия…", "downloading": "Скачиваю новую версию…",
+                "waiting": "Новая версия скачана и проверена. Она установится, когда закончатся идущие синхронизации.",
+                "installing": "Устанавливаю — LDTF перезапустится и эта страница обновится сама…"}
+
+
+def update_card(app: "App") -> str:
+    """Settings → Основные: the version, the daily check switch, what's new and how to update this kind of install."""
+    from ..update import notes_html
+    u = app.updater
+    s = u.snapshot()
+    st, kind, latest = s["state"], s["kind"], s.get("latest") or {}
+    parts = []
+    res = app.update_result
+    if res and time.time() - res.get("_seen", time.time()) > 600:   # the first ten minutes after the restart
+        res = app.update_result = None
+    if res:
+        res.setdefault("_seen", time.time())
+        parts.append(banner("ok", f"LDTF обновлён до версии {E(str(res.get('to')))}.") if res.get("ok") else
+                     banner("err", f"Обновление до {E(str(res.get('to')))} не удалось ({E(str(res.get('error') or ''))}) — "
+                                   f"LDTF вернулся к версии {E(str(res.get('from')))}. Подробности: .update/update.log."))
+    parts.append(app.shell.form("/app", setting(
+        "Проверять обновления автоматически", "Раз в день LDTF спрашивает GitHub, вышла ли новая версия. Без "
+        "интернета проверка тихо пропускается.", switch("update_check", app.settings().get("update_check", True))),
+        cls="settings", autosave=True))
+    check = app.shell.form("/app/update/check", btn("Проверить сейчас", "outlined sm", "update"))
+    when = f" · проверено {ts_human(s['checked_at'])}" if s.get("checked_at") else ""
+    if st in UPDATE_STEPS:
+        pct = s.get("progress")
+        bar = (f'<div class="lp"><div class="lp-i" style="width:{int(pct)}%"></div></div>' if pct is not None else
+               '<div class="lp ind"><div class="lp-i"></div></div>')
+        stop = (app.shell.form("/app/update/stop-syncs", btn("Остановить синхронизации и обновить", "tonal sm", "stop_circle"))
+                if st == "waiting" else "")
+        parts.append(f'<div class="upd-run"><p class="upd-step">{E(UPDATE_STEPS[st])}'
+                     f'<span class="upd-pct">{f" {int(pct)}%" if pct is not None else ""}</span></p>{bar}{stop}</div>')
+    elif s["available"]:
+        v = latest["version"]
+        date = f" от {ts_date(int(_iso_ts(latest.get('published'))))}" if latest.get("published") else ""
+        notes = notes_html(latest.get("notes") or "", E)
+        what = fold("Что нового", f'<div class="upd-notes">{notes}</div>', "fold upd-fold", " open") if notes else ""
+        if kind == "release":
+            act = app.shell.form("/app/update/install", btn(f"Обновить до {v}", "", "upgrade"),
+                                 confirm=f"LDTF скачает версию {v}, проверит её и перезапустится. Синхронизации, если идут, "
+                                         f"сначала закончатся. Продолжить?")
+        elif kind == "git":
+            act = (f'<p class="small muted">Эта копия LDTF — клон репозитория: обновите её командой '
+                   f'<code>git pull</code> и перезапустите LDTF.</p>')
+        elif kind == "docker":
+            act = ('<p class="small muted">LDTF работает в Docker: обновите образ на сервере командой '
+                   '<code>docker compose pull &amp;&amp; docker compose up -d</code> — архивы останутся.</p>')
+        else:
+            act = btn("Скачать с GitHub", "outlined sm", "download", href=latest.get("url") or "#",
+                      attrs=' target="_blank" rel="noopener noreferrer"')
+        parts.append(f'<div class="upd-new"><p class="upd-head">{icon("upgrade")}<b>Доступна версия {E(v)}</b>'
+                     f'<span class="muted">{E(date)} · установлена {E(s["current"])}</span></p>{what}'
+                     f'<div class="btn-row">{act}{check}</div></div>')
+    else:
+        parts.append(f'<div class="upd-cur"><p>{icon("check_circle", fill=True)}<span>Установлена последняя версия '
+                     f'<b>{E(s["current"])}</b>{E(when)}</span></p>{check}</div>')
+    if s.get("error") and st not in UPDATE_STEPS:
+        parts.append(banner("err", E(s["error"])))
+    return (f'<section class="card fgroup upd" id="upd" data-upd="{E(st)}" data-version="{E(s["current"])}">'
+            f'<h2>{icon("system_update_alt")}Обновления</h2>{"".join(parts)}</section>')
+
+
+def _iso_ts(s: str | None) -> float:
+    import datetime as _dt
+    try:
+        return _dt.datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def app_settings_page(app: "App", notice: str = FLASH) -> str:
     """Every control saves itself when changed (app.js, one field at a time)."""
     s = app.settings()
@@ -456,7 +528,7 @@ def app_settings_page(app: "App", notice: str = FLASH) -> str:
                    "Пригодится, если синхронизации стали заканчиваться ошибками.",
                    btn("Проверить", "outlined sm", "network_check", href="/diagnostics"))
              + access + stop + "</section>")
-    body = page_head("Настройки приложения") + app_tabs("app") + notice + form + about
+    body = page_head("Настройки приложения") + app_tabs("app") + notice + form + update_card(app) + about
     return app.page("Настройки приложения", body, active="app")
 
 
@@ -623,6 +695,35 @@ def post_reactions(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -
                  values={"neg": [str(x) for x in neg]})
 
 
+def post_update_check(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
+    s = app.updater.check(force=True)
+    app.invalidate()
+    note = (f"Доступна версия {s['latest']['version']}" if s["available"] else
+            s.get("error") or "Установлена последняя версия")
+    return h.redirect("/app#upd", flash=snackbar(note))
+
+
+def post_update_install(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
+    """Download, check and install the new version (a release on Windows); the page follows the progress."""
+    from ..update import restart_args
+    u = app.updater
+    if not u.available():
+        return h.redirect("/app#upd", flash=snackbar("Новой версии нет"))
+    try:
+        u.install(busy=lambda: bool(app.jobs.active()), stop_jobs=None,
+                  args=restart_args(app.library, app.explicit_port), port=app.port, quit_app=app.request_quit)
+    except RuntimeError as e:
+        return h.redirect("/app#upd", flash=banner("err", E(str(e))))
+    return h.redirect("/app#upd")
+
+
+def post_update_stop_syncs(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
+    """The update waits for running syncs: stop them now (their progress is kept, they go on after the restart)."""
+    for j in app.jobs.active():
+        app.jobs.cancel(j.id)
+    return h.redirect("/app#upd")
+
+
 def post_logout(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
     from .auth import handle_logout
     return handle_logout(h)
@@ -635,6 +736,8 @@ def post_agents_token(h: "Handler", app: "App", f: dict, val: Callable[..., str]
 
 APP_ACTIONS = {"/add": post_add, "/app": post_app_settings, "/app/shortcut": post_shortcut, "/app/quit": post_quit,
                "/app/reactions": post_reactions, "/app/agents/token": post_agents_token, "/logout": post_logout,
+               "/app/update/check": post_update_check, "/app/update/install": post_update_install,
+               "/app/update/stop-syncs": post_update_stop_syncs,
                "/diagnostics": post_diagnostics}
 
 

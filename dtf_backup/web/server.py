@@ -90,6 +90,10 @@ class App:
         self.on_quit: Any = None                 # set by the runner (tray / console)
         self._rebuild_timer: threading.Timer | None = None
         self._mcp: Any = None
+        from ..update import Updater
+        self.updater = Updater(self.library, self.settings)
+        self.explicit_port: int | None = None   # given with --port / LDTF_PORT: an update restarts on it again
+        self.update_result: dict | None = None  # what the last update did (shown once on the settings page)
         if self.remote and password:
             from .auth import Gate
             self.gate = Gate(self, password)
@@ -287,8 +291,9 @@ class App:
              extra: str = "", bare: bool = False) -> str:
         cur = self.current_nick(nick)
         current = self.account(cur) if cur else None
+        upd = self.updater.latest.get("version", "") if self.updater.available() and self.updater.latest else ""
         return self.shell.page(title, body, current=current, accounts=self.accounts(), active=active, wide=wide,
-                               extra=extra, bare=bare)
+                               extra=extra, bare=bare, update=upd)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -516,6 +521,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(snap)
             if path == "/api/diagnostics":
                 return self.json(self.app.diag)
+            if path == "/api/update":
+                return self.json(self.app.updater.snapshot())
             if path == "/":
                 last = self.cookie("last")
                 accs = self.app.accounts()
@@ -858,6 +865,7 @@ class Runtime:
                  host: str = "127.0.0.1", password: str | None = None):
         self.port = port if port else _free_port(DEFAULT_PORT, host)
         self.app = App(library, self.port, host, password)
+        self.app.explicit_port = port
         self.app.scheduler.first_delay = scheduler_delay
         Handler.app = self.app
         self.httpd = Server((host, self.port), Handler)
@@ -876,6 +884,13 @@ class Runtime:
         write_json(run_file(self.app.library), {"pid": os.getpid(), "port": self.port, "token": self.app.token,
                                                 "version": __version__, "started": int(time.time())})
         self._catch_up()
+        from ..update import take_result
+        res = take_result()
+        if res:
+            self.app.update_result = res
+            log.info(f"[обновление] {res.get('from')} → {res.get('to')}: " +
+                     ("готово" if res.get("ok") else f"не удалось ({res.get('error')}), вернулась {res.get('from')}"))
+        self.app.updater.start()
         log.info(f"LDTF {__version__} работает: {self.url} (архивы: {self.app.library})")
         return self
 
@@ -903,6 +918,7 @@ class Runtime:
         self.stopped.set()
         log.info("LDTF останавливается: синхронизации сохраняют прогресс…")
         self.app.scheduler.stop()
+        self.app.updater.stop()
         self.app.jobs.stop(timeout)
         self.httpd.shutdown()
         self.httpd.server_close()

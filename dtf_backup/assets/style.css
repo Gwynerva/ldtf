@@ -520,6 +520,29 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--mark); color: inher
 .pos { color: var(--pos); }
 .neg { color: var(--neg); }
 
+/* ======================================================================= updates */
+.upd-dot { position: relative; width: 10px; height: 10px; margin: -18px 0 0 -14px; border: 2px solid var(--card); border-radius: 50%;
+  background: var(--primary); flex: none; }
+.upd-badge { margin-left: auto; padding: 0 8px; border-radius: var(--r-full); background: var(--primary); color: var(--on-primary);
+  font-size: 12px; font-weight: 600; line-height: 20px; }
+.upd .settings .setting { padding-top: 4px; }
+.upd-cur { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px;
+  padding-top: 12px; border-top: 1px solid var(--outline-variant); }
+.upd-cur p { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; }
+.upd-cur p .i { flex: none; color: var(--pos); }
+.upd-new, .upd-run { padding-top: 12px; border-top: 1px solid var(--outline-variant); }
+.upd-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin: 0 0 4px; }
+.upd-head .i { color: var(--primary); }
+.upd-head .muted { font-size: 14px; }
+.upd-notes { margin: 4px 0 8px; padding: 4px 16px; border-radius: var(--r-md); background: var(--sc-low); font-size: 14px; }
+.upd-notes h3 { margin: 10px 0 4px; font-size: 15px; }
+.upd-notes ul { margin: 4px 0; padding-left: 20px; }
+.upd-notes li { margin: 3px 0; }
+.upd-new .btn-row { margin-top: 12px; align-items: center; }
+.upd-step { margin: 0 0 10px; font-size: 14px; }
+.upd-pct { font-variant-numeric: tabular-nums; color: var(--on-surface-variant); }
+.upd-run form { margin-top: 12px; }
+
 /* ======================================================================= login (a server reachable over the network) */
 .login { display: flex; flex-direction: column; gap: 14px; max-width: 400px; margin: 10vh auto 0; padding: 32px 28px 28px;
   text-align: center; }

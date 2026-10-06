@@ -13,6 +13,7 @@ DEFAULTS: dict[str, Any] = {
     "autosync": True,        # scheduled syncs (a global pause switch)
     "notify": True,          # tray notifications about finished / failed syncs
     "open_browser": True,    # open the browser when LDTF is started by hand
+    "update_check": True,    # ask GitHub once a day whether there is a new version (update.py)
 }
 LIMITS: dict[str, tuple] = {}
 
