@@ -549,6 +549,23 @@
       flash(target);
     }, 60);
   }
+  // ---- "Копировать" (agents' settings): the clipboard API needs https or localhost; elsewhere select + copy
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest && e.target.closest("[data-copy]");
+    if (!b) return;
+    var el = document.getElementById(b.getAttribute("data-copy"));
+    if (!el) return;
+    function done(ok) { snack(ok ? "Скопировано" : "Не удалось скопировать — выделите текст и скопируйте вручную", !ok); }
+    function fallback() {
+      var r = document.createRange(); r.selectNodeContents(el);
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      var ok = false; try { ok = document.execCommand("copy"); } catch (x) { ok = false; }
+      done(ok);
+    }
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(el.textContent).then(function () { done(true); }, fallback);
+    else fallback();
+  });
+
   window.addEventListener("hashchange", function () { if (!/^#ветка-/.test(decodeURIComponent(location.hash))) revealTarget(location.hash); });
   if (location.hash && !/^#ветка-/.test(decodeURIComponent(location.hash))) {
     if (document.readyState === "complete") revealTarget(location.hash);

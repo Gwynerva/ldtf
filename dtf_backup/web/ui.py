@@ -166,7 +166,8 @@ def manage_tabs(links: "Links", active: str) -> str:
                 active)
 
 
-APP_TABS = [("/app", "Основные", "settings", "app"), ("/app/reactions", "Реакции", "add_reaction", "reactions")]
+APP_TABS = [("/app", "Основные", "settings", "app"), ("/app/reactions", "Реакции", "add_reaction", "reactions"),
+            ("/app/agents", "ИИ-агенты", "smart_toy", "agents")]
 APP_PAGES = {k for _, _, _, k in APP_TABS} | {"diagnostics"}   # the account menu marks "Настройки приложения" on them
 
 

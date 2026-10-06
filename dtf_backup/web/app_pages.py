@@ -618,8 +618,14 @@ def post_reactions(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -
                  values={"neg": [str(x) for x in neg]})
 
 
+def post_agents_token(h: "Handler", app: "App", f: dict, val: Callable[..., str]) -> None:
+    app.reset_mcp_token()
+    return h.redirect("/app/agents", flash=snackbar("Выпущен новый токен — обновите настройки агентов"))
+
+
 APP_ACTIONS = {"/add": post_add, "/app": post_app_settings, "/app/shortcut": post_shortcut, "/app/quit": post_quit,
-               "/app/reactions": post_reactions, "/diagnostics": post_diagnostics}
+               "/app/reactions": post_reactions, "/app/agents/token": post_agents_token,
+               "/diagnostics": post_diagnostics}
 
 
 # ------------------------------------------------ archive actions (/u/<nick>/<action>): handler(h, app, arch, fields, val)

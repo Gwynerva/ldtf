@@ -10,6 +10,7 @@ page needs the password (web/auth.py) unless LDTF_AUTH=off says a reverse proxy 
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import html
@@ -87,6 +88,35 @@ class App:
         self.finish_listeners: list[Any] = []   # the tray shows notifications
         self.on_quit: Any = None                 # set by the runner (tray / console)
         self._rebuild_timer: threading.Timer | None = None
+        self._mcp: Any = None
+
+    # ------------------------------------------------------------------ MCP over HTTP (POST /mcp)
+    def mcp_dispatcher(self) -> Any:
+        if self._mcp is None:
+            from ..mcp.protocol import Dispatcher
+            from ..mcp.tools import Tools
+            self._mcp = Dispatcher(Tools(self.library))
+        return self._mcp
+
+    def mcp_token(self) -> str:
+        """The Bearer token of /mcp: LDTF_MCP_TOKEN, else one made once and kept in archive/.state/mcp.token."""
+        env = config.mcp_token()
+        if env:
+            return env
+        p = self.library / ".state" / "mcp.token"
+        try:
+            t = p.read_text(encoding="utf-8").strip()
+            if len(t) >= 24:
+                return t
+        except OSError:
+            pass
+        return self.reset_mcp_token()
+
+    def reset_mcp_token(self) -> str:
+        t = secrets.token_urlsafe(32)
+        atomic_write_text(self.library / ".state" / "mcp.token", t + "\n")
+        log.info("[mcp] выпущен новый токен для /mcp")
+        return t
 
     # ------------------------------------------------------------------ app settings, status
     def settings(self) -> dict:
@@ -276,6 +306,12 @@ class Handler(BaseHTTPRequestHandler):
         """On this computer only a local Host is served (DNS rebinding); beyond it the address can be anything."""
         return self.app.remote or self._host_name() in config.LOOPBACK
 
+    def base_url(self) -> str:
+        """How the browser reached this server (the page shows agents the same address)."""
+        proto = "https" if (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" else "http"
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or f"127.0.0.1:{self.app.port}"
+        return f"{proto}://{host.split(',')[0].strip()}"
+
     def _same_origin(self) -> bool:
         """Other sites in the browser can't trigger actions: Origin, when sent, is this server."""
         origin = self.headers.get("Origin")
@@ -413,9 +449,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self.do_GET()
 
+    def do_DELETE(self) -> None:
+        self.send_body(405, b"method not allowed", "text/plain", {"Allow": "POST" if self.path.startswith("/mcp") else "GET, POST"})
+
     def do_GET(self) -> None:
         if not self._local_host():
             return self.send_body(403, b"forbidden", "text/plain")
+        if urllib.parse.urlsplit(self.path).path == "/mcp":   # no server-to-client streams here: POST only
+            return self.send_body(405, b"POST only", "text/plain", {"Allow": "POST"})
         self.start_request()
         u = urllib.parse.urlsplit(self.path)
         path, q = u.path, urllib.parse.parse_qs(u.query)
@@ -462,6 +503,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.html(app_pages.app_settings_page(self.app))
             if path == "/app/reactions":
                 return self.html(app_pages.app_reactions_page(self.app))
+            if path == "/app/agents":
+                from .agents_page import app_agents_page
+                return self.html(app_agents_page(self.app, self.base_url()))
             if path == "/blocks":
                 stamp = tuple(self.app.view_stamp(d.name) for d in archive_dirs(self.app.library))
                 key = ("", "/blocks", qs("f"), qs("a"), stamp)
@@ -559,6 +603,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_body(403, b"forbidden", "text/plain")
         if not self._same_origin():
             return self.send_body(403, "запрос с чужого сайта отклонён".encode(), "text/plain; charset=utf-8")
+        if urllib.parse.urlsplit(self.path).path == "/mcp":
+            return self.mcp_post()
         if urllib.parse.urlsplit(self.path).path.startswith("/api/"):
             return self.api_post()
         self.start_request()
@@ -581,6 +627,74 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"error": f"Ошибка: {type(e).__name__}: {e}"}, 500)
             return self.error_page(e)
 
+
+    def mcp_post(self) -> None:
+        """MCP over Streamable HTTP: one JSON-RPC request per POST, one JSON answer (mcp/protocol.py)."""
+        from ..mcp.protocol import (HEADER_MISMATCH, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR, SUPPORTED,
+                                    UNSUPPORTED_VERSION, request_version)
+
+        def err(status: int, code: int, message: str, rid: Any = None, data: Any = None) -> None:
+            e: dict[str, Any] = {"code": code, "message": message}
+            if data is not None:
+                e["data"] = data
+            self.send_body(status, json.dumps({"jsonrpc": "2.0", "id": rid, "error": e}, ensure_ascii=False).encode(),
+                           "application/json", {"Cache-Control": "no-store"})
+        auth = self.headers.get("Authorization") or ""
+        if not secrets.compare_digest(auth.encode(), f"Bearer {self.app.mcp_token()}".encode()):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Bearer realm="LDTF"')
+            self.send_header("Content-Type", "application/json")
+            body = json.dumps({"error": "нужен заголовок Authorization: Bearer <токен из настроек LDTF → ИИ-агенты>"},
+                              ensure_ascii=False).encode()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            msg = json.loads(self.rfile.read(min(n, 1_000_000)) or b"null")
+        except ValueError as e:
+            return err(400, PARSE_ERROR, f"Parse error: {e}")
+        if not isinstance(msg, dict):
+            return err(400, INVALID_REQUEST, "один JSON-RPC запрос в каждом POST")
+        rid = msg.get("id")
+        hdr = self.headers.get("MCP-Protocol-Version")
+        body_ver = request_version(msg)
+        if hdr and hdr not in SUPPORTED:
+            return err(400, UNSUPPORTED_VERSION, "Unsupported protocol version", rid,
+                       {"supported": list(SUPPORTED), "requested": hdr})
+        if body_ver is not None:   # a modern request: its headers must say what its body says
+            def decoded(v: str | None) -> str | None:
+                if v and v.startswith("=?base64?") and v.endswith("?="):
+                    try:
+                        return base64.b64decode(v[9:-2]).decode("utf-8")
+                    except (ValueError, UnicodeDecodeError):
+                        return None
+                return v
+            method = msg.get("method")
+            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+            if hdr != body_ver:
+                return err(400, HEADER_MISMATCH, f"Header mismatch: MCP-Protocol-Version {hdr!r} != {body_ver!r}", rid)
+            if self.headers.get("Mcp-Method") != method:
+                return err(400, HEADER_MISMATCH, f"Header mismatch: Mcp-Method must be {method!r}", rid)
+            if method in ("tools/call", "resources/read", "prompts/get"):
+                want = params.get("name") if method != "resources/read" else params.get("uri")
+                if decoded(self.headers.get("Mcp-Name")) != want:
+                    return err(400, HEADER_MISMATCH, f"Header mismatch: Mcp-Name must be {want!r}", rid)
+        resp = self.app.mcp_dispatcher().handle(msg)
+        if resp is None:   # a notification
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        status = 200
+        e = resp.get("error") or {}
+        if body_ver is not None and e.get("code") == METHOD_NOT_FOUND:
+            status = 404
+        elif e.get("code") == UNSUPPORTED_VERSION:
+            status = 400
+        self.send_body(status, json.dumps(resp, ensure_ascii=False).encode("utf-8"), "application/json",
+                       {"Cache-Control": "no-store"})
 
     def api_post(self) -> None:
         """JSON job API for the CLI: POST /api/jobs {nick, kind, full, user, accept}; POST /api/jobs/<id>/cancel."""

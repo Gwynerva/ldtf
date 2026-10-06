@@ -1,4 +1,4 @@
-"""Command line: python -m dtf_backup {app,serve,sync,render,status,check-api} ...
+"""Command line: python -m dtf_backup {app,serve,sync,render,status,check-api,mcp} ...
 
 LDTF (`app`: tray + local site, or `serve`: console) is the main interface; the other commands are for scripts,
 agents and automation. While LDTF is running, `sync` hands the job to it, so every sync on this computer shares
@@ -155,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     common(pr)
     pst = sub.add_parser("status", help="прогресс, ошибки, статистика архива")
     common(pst)
+    pm = sub.add_parser("mcp", help="MCP-сервер для ИИ-агентов через stdio: поиск и чтение архивов (только чтение)")
+    common(pm, user=False)
     pc = sub.add_parser("check-api", help="проверить, что API DTF отвечает так, как ожидает инструмент")
     pc.add_argument("--user", default="petra", help="профиль для проверок (по умолчанию petra)")
     pc.add_argument("-v", "--verbose", action="store_true", help="подробный лог в консоль")
@@ -164,6 +166,10 @@ def main(argv: list[str] | None = None) -> int:
         args.root = args.root or config.root() or DEFAULT_LIBRARY
     if hasattr(args, "port"):
         args.port = args.port or config.port()
+
+    if args.cmd == "mcp":   # stdout belongs to the protocol: no console logging
+        from .mcp.stdio import run
+        return run(args.root)
 
     if args.cmd == "app":
         setup_logging(None, args.verbose, app_log=args.root / ".state" / "app.log")

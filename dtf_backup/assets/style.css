@@ -520,6 +520,18 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--mark); color: inher
 .pos { color: var(--pos); }
 .neg { color: var(--neg); }
 
+/* ======================================================================= app settings: AI agents (MCP) */
+.mcp-tools { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); gap: 6px 16px;
+  margin: 12px 0 0; padding: 0; list-style: none; font-size: 14px; }
+.mcp-tools li { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.mcp-tools code { color: var(--primary); white-space: nowrap; }
+.mcp-tools span { color: var(--on-surface-variant); }
+.code-box { margin: 12px 0; overflow: hidden; border-radius: var(--r-md); background: var(--sc-high); }
+.cb-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; padding: 2px 4px 2px 14px;
+  border-bottom: 1px solid var(--outline-variant); font-size: 13px; color: var(--on-surface-variant); }
+.code-box pre { margin: 0; padding: 12px 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.5; white-space: pre; }
+.mcp-token { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+
 /* ======================================================================= DTF blocks catalog, archive block check */
 .bt-toc { margin: 0 0 16px; }
 .bt-toc .chip .n { margin-left: 2px; }
