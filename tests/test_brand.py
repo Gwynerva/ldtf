@@ -43,11 +43,21 @@ class IconsTest(unittest.TestCase):
 class WinIntegrationTest(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows autostart")
     def test_autostart_command(self) -> None:
-        cmd = winintegration.command(background=True)
-        self.assertIn("pythonw", cmd.lower())
-        self.assertIn("app", cmd)
-        self.assertIn("--background", cmd)
-        self.assertNotIn("--background", winintegration.command(background=False))
+        from unittest import mock
+        with mock.patch.object(winintegration, "launcher", lambda root=None: None):   # a git clone
+            cmd = winintegration.command(background=True)
+            self.assertIn("pythonw", cmd.lower())
+            self.assertIn("app", cmd)
+            self.assertIn("--background", cmd)
+            self.assertNotIn("--background", winintegration.command(background=False))
+        exe = Path(r"C:\Program Files\LDTF\LDTF.exe")
+        with mock.patch.object(winintegration, "launcher", lambda root=None: exe):     # a release: LDTF.exe
+            self.assertEqual(winintegration.command(background=True), f'"{exe}" --background')
+            self.assertEqual(winintegration.command(background=False), f'"{exe}"')
+        # autostart of LDTF 1.3 (pythonw.exe in this folder) follows the new launcher
+        old = rf'"{winintegration.APP_ROOT}\runtime\pythonw.exe" -X utf8 -m dtf_backup app --background'
+        new = f'"{winintegration.APP_ROOT}\\LDTF.exe" --background'
+        self.assertTrue(winintegration.needs_repoint(old, new, lambda p: True))
 
     def test_autostart_state(self) -> None:
         w = winintegration

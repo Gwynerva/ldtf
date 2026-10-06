@@ -1,7 +1,8 @@
 """Windows integration: start LDTF with Windows (HKCU Run key) and shortcuts with the LDTF icon.
 
-Everything here is a no-op or reports "unavailable" on other systems. The app runs windowless via pythonw.exe
-from the embedded runtime (runtime/python314._pth adds the app folder to sys.path, so no working dir is needed).
+Everything here is a no-op or reports "unavailable" on other systems. A release starts with LDTF.exe (a launcher of
+runtime\pythonw.exe, tools/launcher/LDTF.cs); a folder without it (a git clone) starts pythonw.exe itself — the
+embedded runtime's python314._pth adds the app folder to sys.path, so no working dir is needed.
 """
 
 from __future__ import annotations
@@ -30,6 +31,12 @@ def available() -> bool:
     return os.name == "nt"
 
 
+def launcher(root: Path = APP_ROOT) -> Path | None:
+    """LDTF.exe of a release (None in a git clone or on other systems)."""
+    exe = root / "LDTF.exe"
+    return exe if exe.exists() else None
+
+
 def pythonw() -> Path:
     rt = APP_ROOT / "runtime" / "pythonw.exe"
     if rt.exists():
@@ -51,6 +58,9 @@ def launch_args(background: bool = False) -> list[str]:
 
 
 def command(background: bool = True) -> str:
+    exe = launcher()
+    if exe:
+        return subprocess.list2cmdline([str(exe), *(["--background"] if background else [])])
     return subprocess.list2cmdline([str(pythonw()), *launch_args(background)])
 
 
@@ -168,8 +178,10 @@ def create_shortcut(where: str) -> Path:
     if not available():
         raise OSError("ярлыки поддерживаются только в Windows")
     folder = {"desktop": "Desktop", "startmenu": "Programs"}[where]
-    env = dict(os.environ, LDTF_FOLDER=folder, LDTF_TARGET=str(pythonw()),
-               LDTF_ARGS=subprocess.list2cmdline(launch_args()), LDTF_WORKDIR=str(APP_ROOT), LDTF_ICON=str(ICON))
+    exe = launcher()
+    target, args, ico = (exe, "", exe) if exe else (pythonw(), subprocess.list2cmdline(launch_args()), ICON)
+    env = dict(os.environ, LDTF_FOLDER=folder, LDTF_TARGET=str(target), LDTF_ARGS=args, LDTF_WORKDIR=str(APP_ROOT),
+               LDTF_ICON=str(ico))
     r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
                         SHORTCUT_PS], env=env, capture_output=True, text=True, timeout=60,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

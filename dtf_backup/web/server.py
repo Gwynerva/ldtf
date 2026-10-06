@@ -816,7 +816,9 @@ def find_running(library: Path, port: int = DEFAULT_PORT) -> dict | None:
     try:
         info = json.loads(rf.read_text(encoding="utf-8"))
         ping = _ping(int(info["port"]))
-        if ping and ping.get("library", lib) == lib:   # LDTF before 1.4 doesn't say: its run file is enough
+        # LDTF before 1.4 doesn't name its library: then the process must be the one the run file names (a stale run
+        # file can point at a port another LDTF uses now)
+        if ping and (ping.get("library") == lib or ("library" not in ping and ping.get("pid") == info.get("pid"))):
             return {**info, "url": f"http://127.0.0.1:{int(info['port'])}/"}
     except (OSError, ValueError, KeyError, TypeError):
         pass

@@ -1,5 +1,19 @@
 * text=auto
 *.cmd text eol=crlf
 *.sh text eol=lf
+Dockerfile text eol=lf
 *.png binary
 *.ico binary
+
+# not in the Windows release zip (tools/build_release.py: git archive): it starts with LDTF.exe, updates itself
+tests/ export-ignore
+tools/ export-ignore
+.github/ export-ignore
+showcase/ export-ignore
+LDTF*.cmd export-ignore
+ldtf.sh export-ignore
+Dockerfile export-ignore
+compose.yaml export-ignore
+.dockerignore export-ignore
+.gitattributes export-ignore
+.gitignore export-ignore

@@ -261,6 +261,29 @@ class AppTest(unittest.TestCase):
         self.assertIn('id="b0"', body)
         self.assertIn('id="b2"', body)
 
+    def test_find_running_only_this_library(self) -> None:
+        """Another library's LDTF on the port (or a stale run file pointing at it) is not "already running"."""
+        from unittest import mock
+        from dtf_backup.web import server as srv
+        rf = srv.run_file(self.library)
+        before = rf.read_bytes() if rf.exists() else None
+        try:
+            srv.write_json(rf, {"pid": 111, "port": 9001, "token": "t"})
+            mine = srv.library_id(self.library)
+            for ping, ok in (({"app": "ldtf", "library": mine, "pid": 5}, True),     # LDTF 1.4 of this library
+                             ({"app": "ldtf", "pid": 111}, True),                    # LDTF 1.3 that wrote the run file
+                             ({"app": "ldtf", "pid": 222}, False),                   # 1.3 of another library: stale file
+                             ({"app": "ldtf", "library": "other", "pid": 111}, False)):
+                with mock.patch.object(srv, "_ping", lambda port, p=ping: p if port == 9001 else None):
+                    self.assertEqual(srv.find_running(self.library, 9002) is not None, ok, ping)
+            with mock.patch.object(srv, "_ping", lambda port: {"app": "ldtf", "pid": 1} if port == 9002 else None):
+                self.assertIsNone(srv.find_running(self.library, 9002))              # the default port: must name it
+        finally:
+            if before is None:
+                rf.unlink(missing_ok=True)
+            else:
+                rf.write_bytes(before)
+
     def test_shell(self) -> None:
         import re
         ck = {"Cookie": "last=tester"}
