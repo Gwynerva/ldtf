@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS threads (
 );
 
 CREATE TABLE IF NOT EXISTS media_use (key TEXT, owner TEXT, PRIMARY KEY (key, owner)) WITHOUT ROWID;
+
+-- versions of posts and comments DTF changed or removed (history.py): edit rows keep the replaced version
+CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL, item_id INTEGER NOT NULL, entry_id INTEGER,
+    at INTEGER NOT NULL, event TEXT NOT NULL, state TEXT, version_date INTEGER, sig TEXT, body BLOB
+);
+CREATE INDEX IF NOT EXISTS history_item ON history(kind, item_id, at);
+CREATE INDEX IF NOT EXISTS history_entry ON history(entry_id);
+CREATE UNIQUE INDEX IF NOT EXISTS history_edit ON history(kind, item_id, sig) WHERE event = 'edit';
 """
 
 STORE_SCHEMA = """
@@ -156,7 +166,6 @@ class Archive:
     def raw_post(self, pid: int) -> Path: return self.raw / "posts" / f"{pid}.json.gz"
     def raw_post_tree(self, pid: int) -> Path: return self.raw / "post-trees" / f"{pid}.json.gz"
     def raw_thread(self, eid: int) -> Path: return self.raw / "threads" / f"{eid}.json.gz"
-    def raw_post_history(self, pid: int, ver: int) -> Path: return self.raw / "history" / "posts" / str(pid) / f"{ver}.json.gz"
     def raw_my_comments(self, year: str) -> Path: return self.raw / "my-comments" / f"{year}.jsonl.gz"
 
     @property

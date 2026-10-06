@@ -22,6 +22,7 @@ from ..state import Archive, unpack
 from ..util import COMMENTS, MSK, POSTS, count_label, human_bytes, num, plural, rub, ts_date, ts_human
 from ..viewdb import group_view, open_view, view_meta
 from .icons import icon
+from .history_pages import changes_count
 from .insights import donations_total
 from .ui import (MONTHS_SHORT, CommentView, Links, badge, banner, btn, empty_state, fold, icon_btn,
                  mi, month_title, page_head, pager, pagination, sec_head, stat)
@@ -137,10 +138,13 @@ def page_home(v: ArchiveView) -> tuple[str, str]:
     ext = icon_btn("open_in_new", "Профиль на DTF", prof.get("url") or SITE, attrs=EXT_LINK)
     desc = (prof.get("description") or "").strip()
     donated = donations_total(v)
+    changed = changes_count(v)
     stats = (stat(num(counts["posts"]), plural(counts["posts"], *POSTS), v.links.posts()) +
              (stat(num(counts["my_comments"]), plural(counts["my_comments"], *COMMENTS), v.links.comments())
               if v.comments_on else "") +
              (stat(rub(donated), "донаты", v.links.donations()) if donated else "") +
+             (stat(num(changed), plural(changed, "изменение", "изменения", "изменений") + " на DTF", v.links.changes())
+              if changed else "") +
              (stat(num(media_n), f"медиа · {human_bytes(media_size)}") if media_n else ""))
     more = lambda label, href: f'<a class="btn text" href="{E(href)}">{E(label)}{icon("chevron_right")}</a>'  # noqa: E731
     yl = "".join(f'<a class="chip" href="{E(v.links.comments())}#y{y}">{y}<span class="n">{num(n)}</span></a>'
@@ -223,7 +227,11 @@ def page_post(v: ArchiveView, pid: int) -> tuple[str, str] | None:
     pairs = [tuple(x) for x in json.loads(row["rx"] or "[]")]
     dm = p.get("dateModified")
     meta = [f'<span>{ts_human(p.get("date"))}</span>']
-    if dm and dm - (p.get("date") or 0) > 600:
+    versions, hist = row["versions"] or 1, row["hist"] or 0
+    if versions > 1:   # the archive keeps earlier versions: their history
+        meta.append(f'<a class="mi hist-link" href="{E(v.links.post_history(pid))}" title="Изменён {ts_human(dm)} — '
+                    f'история правок">{icon("edit")}изменён · {count_label(versions, "версия", "версии", "версий")}</a>')
+    elif dm and dm - (p.get("date") or 0) > 600:
         meta.append(mi("edit", "изменён", f"Изменён {ts_human(dm)}"))
     if row["source"] == "timeline":
         meta.append(badge("сохранён из ленты", "info", title="Страница поста была недоступна"))
@@ -231,8 +239,13 @@ def page_post(v: ArchiveView, pid: int) -> tuple[str, str] | None:
         meta.append(badge("скрыт из профиля", "visibility_off"))
     site = (p.get("_site") or {}).get("state")
     if site:
-        meta.append(badge(state_title(site), "history", "site", "На DTF поста в прежнем виде больше нет; в архиве сохранена "
-                          f"версия от {ts_human(p.get('dateModified') or p.get('date'))}"))
+        title = ("На DTF поста в прежнем виде больше нет; в архиве сохранена версия от "
+                 f"{ts_human(p.get('dateModified') or p.get('date'))}")
+        if hist:
+            meta.append(f'<a class="badge site" href="{E(v.links.post_history(pid))}" title="{E(title)}">'
+                        f'{icon("history")}{E(state_title(site))}</a>')
+        else:
+            meta.append(badge(state_title(site), "history", "site", title))
     meta.append('<span class="sp"></span>' + icon_btn("open_in_new", "Открыть на DTF", p.get("url") or post_url(pid),
                                                      attrs=EXT_LINK))
     foot = []

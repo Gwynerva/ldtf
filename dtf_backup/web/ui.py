@@ -56,6 +56,12 @@ class Links:
     def go(self, cid: int) -> str: return f"{self.base}/go/c/{int(cid)}"
     def search(self) -> str: return self.base + "/search"
     def donations(self) -> str: return self.base + "/donations"
+    def changes(self) -> str: return self.base + "/changes"
+    def post_history(self, pid: int) -> str: return f"{self.base}/p/{int(pid)}/history"
+    def comment_history(self, cid: int) -> str: return f"{self.base}/c/{int(cid)}/history"
+
+    def post_version(self, pid: int, hid: int, full: bool = False) -> str:
+        return f"{self.base}/p/{int(pid)}/history/{int(hid)}" + ("?full=1" if full else "")
     def sync(self) -> str: return self.base + "/sync"
     def settings(self) -> str: return self.base + "/settings"
     def action(self, name: str) -> str: return f"{self.base}/{name}"   # POST: sync/start, sync/stop, render, guard, delete
@@ -451,11 +457,16 @@ class CommentView:
         if c.get("donation"):
             badges.append(f'<span class="badge don" title="Донат автору поста вместе с комментарием">'
                           f'{icon("volunteer_activism")}Донат {rub(c["donation"])}</span>')
-        if c.get("isEdited"):
+        hist = self.links.comment_history(c["id"]) if c.get("hist") and self.links else None
+        if hist and not c.get("site"):   # the versions the archive keeps
+            badges.append(f'<a class="c-ed c-hist" href="{E(hist)}" title="Изменён — история правок">{icon("edit")}'
+                          f'история</a>')
+        elif c.get("isEdited"):
             badges.append(f'<span class="c-ed" title="Отредактирован">{icon("edit")}</span>')
         if c.get("site"):
-            badges.append(f'<span class="c-site" title="На DTF комментария больше нет; в архиве сохранён прежний текст">'
-                          f'{icon("history")}{E(state_title(c["site"]))}</span>')
+            tag, href = ("a", f' href="{E(hist)}"') if hist else ("span", "")
+            badges.append(f'<{tag} class="c-site"{href} title="На DTF комментария больше нет; в архиве сохранён прежний текст">'
+                          f'{icon("history")}{E(state_title(c["site"]))}</{tag}>')
         tog = ""
         if toggle:
             tog = (f'<button class="c-toggle" data-open="Показать ответы · {toggle}" '

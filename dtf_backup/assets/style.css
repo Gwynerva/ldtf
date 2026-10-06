@@ -496,6 +496,72 @@ mark { padding: 0 1px; border-radius: 3px; background: var(--mark); color: inher
 .pos { color: var(--pos); }
 .neg { color: var(--neg); }
 
+/* ======================================================================= history (versions, diffs, changes) */
+a.mi.hist-link { color: var(--primary); font-weight: 500; }
+a.mi.hist-link:hover { text-decoration: none; background: var(--hover-primary); border-radius: var(--r-full);
+  box-shadow: 0 0 0 4px var(--hover-primary); }
+a.c-ed.c-hist { gap: 2px; padding: 0 6px 0 4px; border-radius: var(--r-full); color: var(--primary); font-size: 12px;
+  font-weight: 500; line-height: 22px; }
+a.c-ed.c-hist:hover { background: var(--hover-primary); text-decoration: none; }
+a.c-site:hover { text-decoration: underline; }
+.tl { margin: 0; padding: 8px 20px 8px 16px; list-style: none; }
+.tl-i { position: relative; display: flex; gap: 14px; padding: 14px 0; }
+.tl-i + .tl-i { border-top: 1px solid var(--outline-variant); }
+.tl-i:not(:last-child)::before { content: ""; position: absolute; left: 17px; top: 52px; bottom: -14px; width: 2px;
+  border-radius: 1px; background: var(--outline-variant); }
+.tl-dot { position: relative; z-index: var(--z-raise); display: flex; align-items: center; justify-content: center; flex: none;
+  width: 36px; height: 36px; border-radius: 50%; background: var(--sc-high); color: var(--on-surface-variant); }
+.tl-dot .i { width: 20px; height: 20px; }
+.tl-cur .tl-dot { background: var(--primary-container); color: var(--on-primary-container); }
+.tl-rm .tl-dot { background: var(--error-container); color: var(--on-error-container); }
+.tl-back .tl-dot { background: color-mix(in srgb, var(--pos) 18%, var(--card)); color: var(--pos); }
+.tl-b { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; padding-top: 6px; }
+.tl-b > b { font-weight: 600; }
+.tl-s { font-size: 14px; color: var(--on-surface-variant); overflow-wrap: anywhere; }
+.tl-a { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.tl-c { margin-top: 8px; }
+.tl-c .c { background: var(--sc-low); }
+.tl-since { display: flex; align-items: flex-start; gap: 8px; margin: 12px 4px; }
+.tl-since .i { flex: none; width: 18px; height: 18px; margin-top: 1px; }
+ins, del { text-decoration: none; border-radius: 3px; padding: 0 1px; }
+ins { background: color-mix(in srgb, var(--pos) 22%, transparent); color: inherit; }
+del { background: color-mix(in srgb, var(--neg) 18%, transparent); color: inherit; text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--neg) 70%, transparent); }
+.seg-links { margin: 0 0 16px; }
+.seg-links a { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border-left: 1px solid var(--outline);
+  color: var(--on-surface); font-size: 14px; font-weight: 500; }
+.seg-links a:first-child { border-left: 0; }
+.seg-links a:hover { background: var(--hover); text-decoration: none; }
+.seg-links a.on { background: var(--secondary-container); color: var(--on-secondary-container); }
+.seg-links .i { width: 18px; height: 18px; }
+.d-intro { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 12px; }
+.d-intro .i { flex: none; width: 18px; height: 18px; margin-top: 1px; }
+.post.diff > h1, .post.ver > h1 { margin-top: 0; }
+.dblk { position: relative; margin: 12px -12px; padding: 4px 12px; border-radius: var(--r-md); }
+.dblk > .blk { margin: 8px 0; }
+.dblk.same { opacity: .72; }
+.dblk.ins { background: color-mix(in srgb, var(--pos) 9%, transparent); box-shadow: inset 3px 0 0 var(--pos); }
+.dblk.del { background: color-mix(in srgb, var(--neg) 8%, transparent); box-shadow: inset 3px 0 0 var(--neg); }
+.dblk.del > .blk { opacity: .7; }
+.dblk.chg { box-shadow: inset 3px 0 0 var(--primary); background: color-mix(in srgb, var(--primary) 5%, transparent); }
+.d-lab { display: inline-block; margin: 6px 0 0; padding: 0 8px; border-radius: var(--r-full); font-size: 11px; font-weight: 600;
+  line-height: 20px; letter-spacing: .02em; text-transform: uppercase; background: var(--sc-high); color: var(--on-surface-variant); }
+.dblk.ins .d-lab { background: color-mix(in srgb, var(--pos) 20%, var(--card)); color: var(--pos); }
+.dblk.del .d-lab { background: color-mix(in srgb, var(--neg) 16%, var(--card)); color: var(--neg); }
+.dblk.chg .d-lab { background: var(--primary-container); color: var(--on-primary-container); }
+.d-text { white-space: pre-line; overflow-wrap: anywhere; }
+.d-header { font-size: 20px; font-weight: 600; }
+.d-same > summary { margin: 4px 0; }
+.chips-div { width: 1px; height: 24px; margin: 0 4px; background: var(--outline-variant); flex: none; }
+.ch-li { min-height: 64px; }
+.ch-ic { display: flex; align-items: center; justify-content: center; flex: none; width: 36px; height: 36px; border-radius: 50%;
+  background: var(--sc-high); color: var(--on-surface-variant); }
+.ch-ic .i { width: 20px; height: 20px; }
+.ch-removed .ch-ic { background: var(--error-container); color: var(--on-error-container); }
+.ch-restored .ch-ic { background: color-mix(in srgb, var(--pos) 18%, var(--card)); color: var(--pos); }
+.ch-li .li-link { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ch-li .li-t { font-size: 15px; font-weight: 500; }
+
 /* ======================================================================= donations */
 .mi.don { color: var(--don); font-weight: 600; font-variant-numeric: tabular-nums; }
 .badge.don { background: var(--don-container); color: var(--on-don-container); font-variant-numeric: tabular-nums; }
@@ -937,6 +1003,13 @@ a.badge { text-decoration: none; }
   .seg button { padding: 0 12px; }
   .rx-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
   .don-amt { min-width: 0; font-size: 15px; }
+  .tl { padding: 4px 12px; }
+  .tl-i { gap: 10px; }
+  .tl-dot { width: 32px; height: 32px; }
+  .tl-i:not(:last-child)::before { left: 15px; top: 48px; }
+  .dblk { margin: 12px -8px; padding: 4px 8px; }
+  .seg-links { display: flex; width: 100%; }
+  .seg-links a { flex: 1 1 0; justify-content: center; padding: 0 8px; }
   .don-li:not(:has(.av, .av0)) { flex-direction: column; align-items: flex-start; gap: 2px; }
   .don-c { padding: 12px; }
   .rx-cell { padding: 12px 4px 8px; font-size: 12px; }

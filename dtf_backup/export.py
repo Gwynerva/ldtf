@@ -15,7 +15,8 @@ from .context import ancestors, descendants
 from .normalize import Linker, MediaResolver, comment_text, media_info, post_ref, slug_from_url
 from .reactions import Reactions, reaction_pairs, reactions_total
 from .util import MSK, atomic_write_text, dumps, ts_human, ts_iso, write_json
-from .viewdb import Dataset, group_view, post_cover, post_donations, post_lead
+from .state import unpack
+from .viewdb import Dataset, group_view, post_cover, post_donations, post_lead, post_plain_text
 from .web.ui import CommentView, Links, md_tree, month_title
 
 MD_ROOT = "../../../"   # md/<kind>/<file>.md -> library root (archive/), where media/ lives
@@ -119,6 +120,7 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
                                 "reactions": rx.norm(s["rx"]), "isRemoved": s["isRemoved"], **_donations(s),
                                 "siteState": s.get("site")}) + "\n")
                 n_ctx += 1
+    n_hist = _history(ds, data)
     write_json(data / "users.json", {str(k): v for k, v in ds.users.items()}, pretty=False)
     write_json(data / "profile.json", ds.prof)
     write_json(data / "reactions.json", rx.catalog())
@@ -130,12 +132,36 @@ def export(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: MediaR
     for name, p in tmp.items():
         _swap(p, arch.root / name)
     counts = {"posts": len(ds.posts), "myComments": len(ds.my), "postComments": n_pc, "contextComments": n_ctx,
-              "mediaRefs": n_media}
+              "mediaRefs": n_media, "history": n_hist}
     _readme(ds, counts)
     return {"context": ctx_stats, "counts": counts}
 
 
 # ---------------------------------------------------------------------- helpers
+def _history(ds: Dataset, data: Path) -> int:
+    """data/history.jsonl: every edit, removal and return the archive saw, oldest first. An edit carries the version
+    it replaced (`version`: post title + text + blocks, or comment text + media)."""
+    n = 0
+    with open(data / "history.jsonl", "w", encoding="utf-8") as fp:
+        for r in ds.history:
+            if r["kind"] == "comment" and not ds.comments:
+                continue
+            row: dict[str, Any] = {"kind": r["kind"], "id": r["item_id"], "postId": r["entry_id"], "event": r["event"],
+                                   "at": r["at"], "atIso": ts_iso(r["at"])}
+            if r["state"]:
+                row["state"] = r["state"]
+            if r["event"] == "edit" and r["body"]:
+                v = unpack(r["body"])
+                row["versionDate"] = r["version_date"]
+                if r["kind"] == "post":
+                    row["version"] = {"title": v.get("title"), "text": post_plain_text(v), "blocks": v.get("blocks")}
+                else:
+                    row["version"] = {"text": comment_text(v.get("text")).text, "media": v.get("media") or []}
+            fp.write(dumps(row) + "\n")
+            n += 1
+    return n
+
+
 def _donations(c: dict) -> dict:
     """Only when there are any: `donation` — rubles sent with the comment to the post's author, `donationsReceived` —
     rubles the comment itself got."""
@@ -308,6 +334,10 @@ archive/                       библиотека приложения
 - `context.jsonl` — комментарии из веток вокруг комментариев пользователя: `id, postId, parentId, level, date, author, isMine, text,
   media, likes, reactions`. Комментарии пользователя, которых нет в ленте профиля (например, удалённые модератором), тоже
   здесь, с `isMine: true`.
+- `history.jsonl` — что менялось на DTF с тех пор, как LDTF ведёт архив: `kind (post|comment), id, postId, event, at,
+  atIso, state?, versionDate?, version?`. `event`: `edit` — правка, в `version` прежняя версия (у поста `title, text,
+  blocks`, у комментария `text, media`), `removed` — удалён на DTF (`state` — как именно; в архиве осталась прежняя
+  версия), `restored` — снова есть на DTF. Записываются только реальные изменения содержимого, не счётчики.
 - `users.json` — авторы: `id -> {{name, nickname, uri, avatar}}`.
 - `reactions.json` — каталог реакций: `id, label, type, polarity (positive|negative), retired, static/animated`.
   Поле `reactions`: `{{total, positive, negative, items[{{id, count, polarity, label?, unknown?}}]}}`. DTF считает любую

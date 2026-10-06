@@ -15,6 +15,8 @@ Also useful for agents (plain SQL):
   users(id, name, nickname, uri, avatar)
   months(ym, comments, groups, pages); month_groups(ym, pos, page, entry_id, root_id, mine, ...)
   comment_loc(id, ym, page)                              where each owner's comment is shown
+  history(id, kind, item_id, entry_id, at, event, state, version_date, sig, body)   versions and removals (history.py):
+      kind = post | comment; event = edit (body = the replaced version, zlib JSON) | removed (state = why) | restored
   search_docs(id, kind, ref, entry, date, author, title, body)   texts for search; kind: p = post,
       c = comment of the archive's user, o = other people's comment (ref = post/comment id)
   fts(kind, ref, entry, date, title, body, title_s, body_s)     FTS5 over search_docs (+ stemmed columns);
@@ -34,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
+from . import history as hist
 from .context import ancestors, index_tree, keep_ids
 from .normalize import MediaResolver, comment_text, html_to_text, media_info
 from .reactions import reaction_pairs, reactions_total
@@ -49,7 +52,7 @@ VIEW_SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE posts (id INTEGER PRIMARY KEY, date INTEGER, title TEXT, url TEXT, lead TEXT, cover TEXT,
     comments INTEGER, rx TEXT, repost INTEGER, unlisted INTEGER, source TEXT, raw BLOB, site TEXT,
-    donations INTEGER DEFAULT 0, stats_at INTEGER, versions INTEGER DEFAULT 1);
+    donations INTEGER DEFAULT 0, stats_at INTEGER, versions INTEGER DEFAULT 1, hist INTEGER DEFAULT 0);
 CREATE TABLE comments (id INTEGER PRIMARY KEY, entry_id INTEGER, reply_to INTEGER, level INTEGER, date INTEGER,
     author INTEGER, mine INTEGER, feed INTEGER, own_post INTEGER, month TEXT, data BLOB,
     donation INTEGER DEFAULT 0, donated INTEGER DEFAULT 0, hist INTEGER DEFAULT 0);
@@ -64,6 +67,10 @@ CREATE TABLE month_groups (ym TEXT, pos INTEGER, page INTEGER, entry_id INTEGER,
 CREATE INDEX month_groups_root ON month_groups(entry_id, root_id);
 CREATE INDEX month_groups_page ON month_groups(ym, page);
 CREATE TABLE comment_loc (id INTEGER PRIMARY KEY, ym TEXT, page INTEGER);
+CREATE TABLE history (id INTEGER PRIMARY KEY, kind TEXT, item_id INTEGER, entry_id INTEGER, at INTEGER, event TEXT,
+    state TEXT, version_date INTEGER, sig TEXT, body BLOB);
+CREATE INDEX history_item ON history(kind, item_id, at);
+CREATE INDEX history_at ON history(at);
 """
 
 Progress = Callable[[str, int, int], None]
@@ -172,11 +179,19 @@ class Dataset:
         self._index: dict[int, tuple[dict, dict] | None] = {}
         self.listed: dict[int, int] = {}
         self.listed_at: int | None = None
+        self.hist: dict[tuple[str, int], tuple[int, int]] = {}   # (kind, id) -> (edits, events): history.counts
+        self.history: list = []                                    # the history rows themselves
+        self.history_since: int | None = None
         self.comments = arch.settings()["scope"] != "posts"   # the archive keeps comments (setting "scope")
 
     def load(self, progress: Progress | None = None) -> "Dataset":
         a = self.arch
         step = progress or (lambda *_: None)
+        if a.exists():
+            hist.import_legacy(a)   # versions LDTF 1.1-1.3 kept as files
+            self.hist = hist.counts(a.db)
+            self.history = hist.rows(a.db)
+            self.history_since = a.get_meta(hist.META_SINCE)
         files = glob.glob(str(a.raw / "posts" / "*.json.gz"))
         for i, f in enumerate(files):
             self.posts.append(read_json_gz(Path(f)))
@@ -215,6 +230,12 @@ class Dataset:
             d = donated.get(c["id"])
             if d:
                 c["donation"], c["donated"] = max(c["donation"], d[0]), max(c["donated"], d[1])
+        if self.hist:   # comments with versions or removals link to their history
+            for items in (*self.trees.values(), *self.threads.values(), self.my):
+                for c in items:
+                    h = self.hist.get(("comment", c["id"]))
+                    if h:
+                        c["hist"] = h[1]
         for c in self.my:
             e = c.get("entry") or {}
             if e.get("id") and e["id"] not in self.entries:
@@ -356,13 +377,15 @@ def build_view(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: Me
     # posts
     for p in ds.posts:
         cov = post_cover(p, resolver)
+        edits, events = ds.hist.get(("post", p["id"]), (0, 0))
         db.execute("INSERT INTO posts(id, date, title, url, lead, cover, comments, rx, repost, unlisted, source, raw, "
-                   "site, donations, stats_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   "site, donations, stats_at, versions, hist) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                    (p["id"], p.get("date") or 0, p.get("title") or "", p.get("url") or "", post_lead(p),
                     json.dumps(cov, ensure_ascii=False) if cov else None,
                     (p.get("counters") or {}).get("comments", 0), json.dumps(reaction_pairs(p)),
                     1 if p.get("repostId") else 0, 1 if ds.unlisted(p["id"]) else 0, p.get("_source", "content"),
-                    pack(p), (p.get("_site") or {}).get("state"), post_donations(p), p.get("_statsAt")))
+                    pack(p), (p.get("_site") or {}).get("state"), post_donations(p), p.get("_statsAt"), 1 + edits,
+                    events))
         index.add("p", p["id"], p["id"], p.get("date") or 0, ds.uid, p.get("title") or "", post_plain_text(p))
     step("build-posts", 1, 1)
 
@@ -410,6 +433,10 @@ def build_view(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: Me
             db.execute("INSERT OR REPLACE INTO users VALUES (?,?,?,?,?)",
                        (uid, u.get("name"), u.get("nickname"), u.get("uri"), u.get("avatar")))
 
+    db.executemany("INSERT INTO history VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   [(r["id"], r["kind"], r["item_id"], r["entry_id"], r["at"], r["event"], r["state"], r["version_date"],
+                     r["sig"], r["body"]) for r in ds.history if r["kind"] == "post" or ds.comments])
+
     for ym, lst in groups.items():
         pages = max((g["page"] for g in lst), default=1)
         db.execute("INSERT INTO months VALUES (?,?,?,?)", (ym, sum(len(g["mine"]) for g in lst), len(lst), pages))
@@ -422,7 +449,7 @@ def build_view(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: Me
     step("build-months", 1, 1)
 
     meta = {"built_at": now_ts(), "tool_version": __version__, "view_format": VIEW_FORMAT, "uid": ds.uid, "nick": ds.nick,
-            "comments": ds.comments,
+            "comments": ds.comments, "history_since": ds.history_since,
             "profile": ds.prof, "counts": {"posts": len(ds.posts), "my_comments": len(ds.my),
                                            "post_comments": sum(len(v) for v in ds.trees.values()),
                                            "context_entries": len(ds.threads)}}

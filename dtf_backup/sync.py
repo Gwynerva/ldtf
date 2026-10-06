@@ -30,6 +30,7 @@ from .guard import (ACCEPTABLE, COMMENTS_LIMIT, GuardTrip, account_problem, comm
                     merge_items, post_loss, post_stub, post_wiped, posts_limit, site_summary,
                     state_title)
 from .guard import title as guard_title
+from .history import apply_events, ensure as ensure_history, import_legacy, record_edit, record_event
 from .http import AdaptiveLimiter, FatalNetworkError, HttpClient
 from .media import MEDIA_MODES, Downloader, avatar_key, collect_media, effective_media, media_key, owner_sql, raw_key
 from .scope import drop_comments, has_comment_data
@@ -127,22 +128,26 @@ class Syncer:
         return cls(arch, user, **params)
 
     def _write_tree(self, path: Any, items: list[dict], uid: Any, head: dict, threads: set | None = None,
-                    prune: list[int] | None = None) -> tuple[list[dict], dict]:
+                    prune: list[int] | None = None) -> tuple[list[dict], dict, list]:
         """Merge a fresh comment tree with the archived one (what DTF lost keeps its archived text, guard.merge_items)
         and write it. `threads`: compare only these threads (a branch answer); `prune`: keep only the context of these
-        comments (discussion threads). Returns (merged items, merge stats; with `prune` also _kept/_missing)."""
+        comments (discussion threads). Returns (merged items, merge stats — with `prune` also _kept/_missing, history
+        events of the comments kept: the main thread records them, history.apply_events)."""
         old = read_json_gz(path, {}).get("items")
         if old and threads is not None:
             old = [c for c in old if c.get("threadId") in threads]
-        merged, st = merge_items(old, items, now_ts(), uid)
+        events: list = []
+        merged, st = merge_items(old, items, now_ts(), uid, events)
         out = merged
         if prune is not None:
             out, missing = prune_context(merged, prune)
             st = dict(st, _kept=len(out), _missing=missing)
             head = dict(head, missing=missing)
+            kept = {c.get("id") for c in out}
+            events = [e for e in events if e[1].get("id") in kept]
         self.check_cancel()   # a request of a stopped sync that came back late: its lock may already be someone else's
         write_json_gz(path, {**head, "fetchedAt": now_ts(), "items": out})
-        return merged, st
+        return merged, st, events
 
     def report(self, stage: str, **fields: Any) -> None:
         """Structured progress for the app (the console keeps using the log)."""
@@ -182,6 +187,9 @@ class Syncer:
             db.commit()
             log.warning(f"Подтверждено: {guard_title(g['kind'])} — пропавшее будет отмечено, "
                         f"в архиве остаются сохранённые версии.")
+        ensure_history(db)
+        import_legacy(self.arch)
+        db.commit()
         if self.scope == "posts" and has_comment_data(self.arch):   # switched to posts only: drop what is left
             self.report("purge", status="running")
             self.dropped = drop_comments(self.arch)
@@ -470,17 +478,14 @@ class Syncer:
                 loss = post_loss(old, data)
                 if loss:
                     return {"keep": loss}
-                if old is not None and old.get("dateModified") != data.get("dateModified"):
-                    ver = old.get("dateModified") or old.get("date") or 0
-                    write_json_gz(a.raw_post_history(pid, ver), old)   # every edit keeps the previous version
-                write_json_gz(path, data)
-                return {"dateModified": data.get("dateModified"), "source": source,
+                # written by done() in the main thread, after the replaced version went to the history
+                return {"data": data, "old": old, "dateModified": data.get("dateModified"), "source": source,
                         "media": collect_media(data, POST_SKIP_KEYS)}
             items = self.api.post_comments(pid)
             counter = (by_id[pid].get("counters") or {}).get("comments", 0)
-            _, st = self._write_tree(a.raw_post_tree(pid), items, uid, {"postId": pid, "counter": counter})
+            _, st, events = self._write_tree(a.raw_post_tree(pid), items, uid, {"postId": pid, "counter": counter})
             media = [(c["id"], collect_media(c.get("media") or [])) for c in items if c.get("media")]
-            return {"counter": counter, "n": len(items), "media": media, "st": st}
+            return {"counter": counter, "n": len(items), "media": media, "st": st, "events": events}
 
         n_media = 0
 
@@ -497,6 +502,14 @@ class Syncer:
                     db.execute("UPDATE posts SET content_modified=? WHERE id=?", (by_id[pid].get("dateModified"), pid))
                     self._post_lost(pid, res["keep"], ts)
                     return
+                old, data = res["old"], res["data"]
+                if old is not None and old.get("_source", "content") == "content":   # a timeline copy is no version
+                    changed = record_edit(db, "post", old, data, ts, pid)
+                    if old.get("_site"):
+                        changed = record_event(db, "post", pid, "restored", None, ts, pid) or changed
+                    if changed:
+                        db.commit()   # the replaced version is safe before the file is overwritten
+                write_json_gz(a.raw_post(pid), data)
                 db.execute("UPDATE posts SET content_status='ok', content_error=NULL, content_fetched_at=?, "
                            "content_modified=?, site_state=NULL, site_state_at=NULL WHERE id=?",
                            (ts, by_id[pid].get("dateModified"), pid))
@@ -512,6 +525,7 @@ class Syncer:
                            (ts, res["counter"], pid))
                 for cid, refs in res["media"]:
                     n_media += a.queue_media(refs, f"pc:{cid}")
+                apply_events(db, res["events"], ts, pid)
                 self._context_kept(res["st"])
 
         self.run_parallel(pool, tasks, work, done, "посты", total=len(tasks), stage="posts",
@@ -593,6 +607,7 @@ class Syncer:
     def _mark_post(self, pid: int, state: str, ts: int) -> None:
         a = self.arch
         a.db.execute("UPDATE posts SET site_state=?, site_state_at=? WHERE id=?", (state, ts, pid))
+        record_event(a.db, "post", pid, "removed", state, ts, pid)
         path = a.raw_post(pid)
         title = ""
         if path.exists():
@@ -637,6 +652,9 @@ class Syncer:
                     if not cur["site_state"]:
                         self._mark_comment(old, why, ts, dirty_years)
                     continue
+                record_edit(db, "comment", old, c, ts, entry.get("id"))
+                if cur["site_state"]:   # it is on DTF again
+                    record_event(db, "comment", c["id"], "restored", None, ts, entry.get("id"))
             db.execute(
                 "INSERT INTO my_comments(id,entry_id,date,level,reply_to,reply_count,thread_id,last_mod,is_removed,raw,seen_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET entry_id=excluded.entry_id, "
@@ -656,6 +674,7 @@ class Syncer:
     def _mark_comment(self, old: dict, state: str, ts: int, dirty_years: set[str]) -> None:
         self.arch.db.execute("UPDATE my_comments SET site_state=?, site_state_at=?, raw=? WHERE id=?",
                              (state, ts, pack(keep(old, state, ts)), old["id"]))
+        record_event(self.arch.db, "comment", old["id"], "removed", state, ts, (old.get("entry") or {}).get("id"))
         if old.get("date"):
             dirty_years.add(ts_year(old["date"]))
         self.site[f"comments_{state}"] += 1
@@ -865,12 +884,13 @@ class Syncer:
                 raise
             # a branch answer says nothing about the post's other threads: only those threads are compared
             threads = {c.get("threadId") for c in items} if mode == "branch" else None
-            items, st = self._write_tree(a.raw_thread(eid), items, uid, {"entryId": eid, "mode": mode, "myCommentIds": ids},
-                                         threads=threads, prune=ids)
+            items, st, events = self._write_tree(a.raw_thread(eid), items, uid,
+                                                 {"entryId": eid, "mode": mode, "myCommentIds": ids},
+                                                 threads=threads, prune=ids)
             kept_n = st.pop("_kept")
             missing = st.pop("_missing")
             return {"status": "ok", "mode": mode, "n_items": len(items), "n_kept": kept_n, "missing": len(missing),
-                    "st": st}
+                    "st": st, "events": events}
 
         stats = defaultdict(int)
 
@@ -887,6 +907,8 @@ class Syncer:
             stats["missing"] += res.get("missing", 0)
             if res.get("st"):
                 self._context_kept(res["st"])
+            if res.get("events"):
+                apply_events(db, res["events"], ts, eid)
             db.execute(
                 "INSERT INTO threads(entry_id,fetched_at,max_my_comment_id,mode,n_items,n_kept,missing,status,error,attempts) "
                 "VALUES(?,?,?,?,?,?,?,?,?,0) ON CONFLICT(entry_id) DO UPDATE SET fetched_at=excluded.fetched_at, "

@@ -155,6 +155,7 @@ def drop_comments(arch: Archive) -> dict[str, int]:
          "threads": db.execute("SELECT COUNT(*) FROM main.threads").fetchone()[0]}
     for t in COMMENT_TABLES:
         db.execute(f"DELETE FROM main.{t}")
+    db.execute("DELETE FROM main.history WHERE kind='comment'")   # their versions go with them
     db.execute("UPDATE main.posts SET tree_count=NULL, tree_fetched_at=NULL, tree_status=NULL, tree_error=NULL")
     db.execute(f"DELETE FROM main.meta WHERE key IN ({','.join('?' * len(COMMENT_META))})", COMMENT_META)
     g = a.get_meta(META_GUARD)

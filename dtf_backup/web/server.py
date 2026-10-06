@@ -42,7 +42,7 @@ from ..scope import comments_kept, pending_drop
 from ..state import META_GUARD, Archive, archive_dirs, gc_pending, peek_meta
 from ..util import atomic_write_text, log, read_json_gz, write_json
 from ..viewdb import open_view, view_meta, view_outdated, view_ready
-from . import app_pages, insights, viewer
+from . import app_pages, history_pages, insights, viewer
 from .jobs import KINDS, RUNNING, JobManager
 from .ui import ASSETS, Links, Shell, avatar_src, btn, empty_state
 
@@ -490,7 +490,8 @@ class Handler(BaseHTTPRequestHandler):
             target = viewer.page_go(v, int(m.group(1)))
             return self.redirect(target, 302) if target else self.not_found("Комментарий не найден в архиве")
         guard = ((app.account(nick) or {}).get("guard") or {}).get("ts")   # the page chrome shows the guard banner
-        key = (nick, sub, qs("q"), qs("t"), qs("y"), qs("s"), qs("page"), qs("exact"), tuple(q.get("g") or ()), guard)
+        key = (nick, sub, qs("q"), qs("t"), qs("y"), qs("s"), qs("page"), qs("exact"), tuple(q.get("g") or ()), guard,
+               qs("full"), qs("e"), qs("k"))
 
         def build() -> str | None:
             res, active, wide = None, "", False
@@ -502,6 +503,9 @@ class Handler(BaseHTTPRequestHandler):
                 res, active, wide = viewer.page_calendar(v), "comments", True
             elif sub == "/donations":
                 res, active = insights.page_donations(v), "index"
+            elif sub == "/changes":
+                page = int(qs("page", "1")) if qs("page", "1").isdigit() else 1
+                res, active = history_pages.page_changes(v, qs("e"), qs("k"), page), "index"
             elif sub == "/search":
                 page = int(qs("page", "1") or 1) if qs("page", "1").isdigit() else 1
                 gs = q.get("g") or ["1"]  # checkbox + hidden fallback: "1" when checked
@@ -513,6 +517,16 @@ class Handler(BaseHTTPRequestHandler):
                 mm = re.fullmatch(r"/p/(\d+)", sub)
                 if mm:
                     res, active = viewer.page_post(v, int(mm.group(1))), "posts"
+                mm = re.fullmatch(r"/p/(\d+)/history", sub)
+                if mm:
+                    res, active = history_pages.page_post_history(v, int(mm.group(1))), "posts"
+                mm = re.fullmatch(r"/p/(\d+)/history/(\d+)", sub)
+                if mm:
+                    res, active = history_pages.page_post_version(v, int(mm.group(1)), int(mm.group(2)),
+                                                                  qs("full") == "1"), "posts"
+                mm = re.fullmatch(r"/c/(\d+)/history", sub)
+                if mm:
+                    res, active = history_pages.page_comment_history(v, int(mm.group(1))), "comments"
                 mm = re.fullmatch(r"/c/(\d{4}-\d{2})", sub)
                 if mm:
                     page = int(qs("page", "1")) if qs("page", "1").isdigit() else 1

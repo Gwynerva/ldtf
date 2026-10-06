@@ -215,9 +215,11 @@ def keep(old: dict, state: str, ts: int | None = None) -> dict:
 
 
 def merge_items(old_items: list[dict] | None, new_items: list[dict], ts: int | None = None,
-                uid: int | None = None) -> tuple[list[dict], Counter]:
+                uid: int | None = None, events: list | None = None) -> tuple[list[dict], Counter]:
     """Fresh comment tree/branch merged with the archived one: comments that turned into placeholders keep their
-    archived text, comments that vanished are put back. Stats count only new losses (kept, gone, mine)."""
+    archived text, comments that vanished are put back. Stats count only new losses (kept, gone, mine).
+    `events` (history.apply_events) gets what changed: ("edit", old, new), ("removed", old, state), ("restored", old)."""
+    from .history import edited
     ts = ts or now_ts()
     old = {c["id"]: c for c in old_items or [] if isinstance(c, dict) and "id" in c}
     st: Counter = Counter()
@@ -232,8 +234,15 @@ def merge_items(old_items: list[dict] | None, new_items: list[dict], ts: int | N
                 st["kept"] += 1
                 if uid is not None and (o.get("author") or {}).get("id") == uid:
                     st["mine"] += 1
+                if events is not None:
+                    events.append(("removed", o, why))
             out.append(keep(o, why, ts))
         else:
+            if events is not None and o is not None:
+                if edited("comment", o, c):
+                    events.append(("edit", o, c))
+                if o.get("_site"):
+                    events.append(("restored", o))
             out.append(c)
     appended = False
     for cid, o in old.items():
@@ -243,6 +252,8 @@ def merge_items(old_items: list[dict] | None, new_items: list[dict], ts: int | N
             st["gone"] += 1
             if uid is not None and (o.get("author") or {}).get("id") == uid:
                 st["mine"] += 1
+            if events is not None:
+                events.append(("removed", o, "gone"))
         out.append(keep(o, "gone", ts))
         appended = True
     if appended:

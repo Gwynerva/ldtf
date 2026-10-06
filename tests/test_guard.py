@@ -404,9 +404,11 @@ class GuardSyncTest(unittest.TestCase):
         self.fake.posts[2]["dateModified"] += 50
         self.assertEqual(self.sync(), 0)
         self.assertEqual(len(self.raw_post(2)["blocks"]), 2)
-        hist = self.arch.raw_post_history(2, old_mod)
-        self.assertTrue(hist.exists())
-        self.assertEqual(len(read_json_gz(hist)["blocks"]), 1)
+        row = self.arch.db.execute("SELECT version_date, body FROM history WHERE kind='post' AND item_id=2 "
+                                   "AND event='edit'").fetchone()
+        self.arch.close()
+        self.assertEqual(row[0], old_mod)
+        self.assertEqual(len(unpack(row[1])["blocks"]), 1)
 
     def test_context_media_is_queued(self) -> None:
         # other people's pictures in the kept discussion branches are archived too (the app works offline)
