@@ -504,7 +504,13 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/assets/"):
                 return self.static(ASSETS, path[len("/assets/"):], immutable=bool(qs("v")))
             if path.startswith("/media/"):
-                return self.static(self.app.library / "media", path[len("/media/"):], immutable=True)
+                rel = path[len("/media/"):]
+                if not (self.app.library / "media" / urllib.parse.unquote(rel)).is_file():
+                    from ..media import remote_for
+                    url = remote_for(self.app.library, urllib.parse.unquote(rel))
+                    if url:   # in the catalog, not on the disk: from DTF until a check downloads it again
+                        return self.redirect(url, 302)
+                return self.static(self.app.library / "media", rel, immutable=True)
             if path == "/api/ping":
                 return self.json({"app": "ldtf", "version": __version__, "pid": os.getpid(),
                                   "library": self.app.library_id})

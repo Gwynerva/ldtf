@@ -628,6 +628,17 @@ class AppTest(unittest.TestCase):
         self.assertEqual(code, 206)
         self.assertTrue(h.get("Content-Range", "").startswith("bytes 0-5/"))
         self.assertEqual(self.get("/media/../.state/media.sqlite")[0], 404)
+        # in the catalog but gone from the disk (deleted, set aside as damaged): DTF's copy until a check brings it back
+        f = self.library / idx["path"]
+        data = f.read_bytes()
+        f.unlink()
+        try:
+            code, _, h = self.get("/" + idx["path"], redirect=False)
+            self.assertEqual(code, 302)
+            self.assertIn(IMG, h.get("Location", ""))
+            self.assertEqual(self.get("/media/00/" + "0" * 64 + ".jpg", redirect=False)[0], 404)   # unknown: no guess
+        finally:
+            f.write_bytes(data)
 
     # ---------------------------------------------------------------- security
     def test_security(self) -> None:

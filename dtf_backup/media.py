@@ -279,6 +279,25 @@ def _read_index(library: Path, where: str = "", params: Iterable[Any] = ()) -> d
     return idx
 
 
+def remote_for(library: Path, rel: str) -> str | None:
+    """DTF's address of a stored file (media/<sha[:2]>/<sha>.<ext>) — for a file the catalog has but the disk doesn't
+    (deleted or set aside as damaged): the page shows it from DTF until the next check downloads it again."""
+    from .state import connect_ro, store_path
+    sha = Path(rel).name.split(".")[0]
+    p = store_path(library)
+    if not re.fullmatch(r"[0-9a-f]{64}", sha) or not p.exists():
+        return None
+    try:
+        db = connect_ro(p, timeout=5)
+        try:
+            row = db.execute("SELECT key FROM media_ref WHERE sha256=? OR expect_sha=? LIMIT 1", (sha, sha)).fetchone()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - an old catalog (no expect_sha) or a locked one: no fallback
+        return None
+    return media_url(row[0]) if row else None
+
+
 def load_media_index(library: Path) -> dict[str, dict]:
     """The whole shared catalog (for rendering an archive)."""
     return _read_index(library)
