@@ -660,6 +660,32 @@ del { background: color-mix(in srgb, var(--neg) 18%, transparent); color: inheri
 .d-header { font-size: 20px; font-weight: 600; }
 .d-same > summary { margin: 4px 0; }
 .chips-div { width: 1px; height: 24px; margin: 0 4px; background: var(--outline-variant); flex: none; }
+/* «Удалённое на DTF»: what it was -> what DTF has now (quiet: no warning colours) */
+.rm-list { display: grid; gap: 10px; }
+.rm-day { margin: 14px 0 2px; font-size: 14px; font-weight: 500; color: var(--on-surface-variant); }
+.rm-day:first-child { margin-top: 4px; }
+.rm-item { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(170px, 230px); gap: 8px 14px;
+  align-items: start; padding: 12px 16px; }
+.rm-lab { display: block; margin: 0 0 6px; font-size: 11px; font-weight: 500; letter-spacing: .6px; text-transform: uppercase;
+  color: var(--on-surface-variant); }
+.rm-was { min-width: 0; }
+.rm-was .c { padding: 4px 0; background: none; }
+.rm-was .c .c-t { display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+.rm-post { display: flex; gap: 12px; align-items: flex-start; color: inherit; text-decoration: none; min-width: 0; }
+.rm-post:hover b { text-decoration: underline; }
+.rm-thumb { flex: none; width: 72px; height: 72px; border-radius: var(--r-sm); object-fit: cover; background: var(--sc-high); }
+.rm-pt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rm-pt b { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.rm-lead { font-size: 14px; color: var(--on-surface-variant); display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; }
+.rm-sub { display: block; font-size: 13px; color: var(--on-surface-variant); }
+.rm-arrow { align-self: center; color: var(--outline); }
+.rm-arrow .i { width: 20px; height: 20px; }
+.rm-now { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding-left: 14px;
+  border-left: 1px solid var(--outline-variant); }
+.rm-state { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; }
+.rm-state .i { flex: none; width: 18px; height: 18px; color: var(--on-surface-variant); }
+.rm-acts { font-size: 13px; margin-top: 4px; }
 .ch-li { min-height: 64px; }
 .ch-ic { display: flex; align-items: center; justify-content: center; flex: none; width: 36px; height: 36px; border-radius: 50%;
   background: var(--sc-high); color: var(--on-surface-variant); }
@@ -866,7 +892,10 @@ body.focus-open { overflow: hidden; }
 .eh-t a { color: var(--on-surface); font-weight: 600; }
 .eh-t a:hover { color: var(--primary); }
 .mc-n, .sg-n { margin: -2px 0 -2px auto; }
-.mc .ctx .c-t { color: var(--on-surface-variant); }
+.mc .ctx > .c .c-t { color: var(--on-surface-variant); }   /* the context; the answers nested under it are not */
+/* «в ответ <who>»: comments of a chain shown one under another (the collapsed part above the comment answered) */
+.c-re { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--on-surface-variant); }
+.c-re .i { width: 16px; height: 16px; }
 .ctx-more > summary { gap: 4px; margin: 0 0 2px 4px; font-size: 13px; }
 .ctx-note { display: flex; align-items: center; gap: 6px; margin: 4px 12px 0; font-size: 13px; color: var(--on-surface-variant); }
 .ctx-note .i { width: 16px; height: 16px; }
@@ -882,11 +911,16 @@ body.f-replies .mc[data-r="0"], body.f-media .mc[data-m="0"], body.f-own .mc[dat
 .sres-n { margin: 16px 0 12px; font-size: 14px; color: var(--on-surface-variant); }
 .sg { margin: 0 0 12px; padding: 8px 8px 10px; }
 .sh { margin-top: 2px; }
-.sh-ctx { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 2px 6px; margin: 6px 0 0 20px; padding: 2px 0 2px 10px;
-  border-left: 2px solid var(--outline-variant); font-size: 13px; color: var(--on-surface-variant); overflow-wrap: anywhere; }
-.sh-ctx > .i { width: 16px; height: 16px; }
-.sh-ctx .ca { font-size: 13px; gap: 4px; }
-.sh-ctx .av, .sh-ctx .av0 { --s: 18px; }
+/* what a found comment answers: a reply quote inside it (labelled «В ответ …»), not a thread line */
+.sh-quote { display: flex; flex-direction: column; gap: 2px; margin: 6px 0 6px; padding: 6px 10px 7px;
+  border-radius: var(--r-sm); background: var(--sc-high); font-size: 13px; color: var(--on-surface-variant); }
+.sh.mine .sh-quote { background: color-mix(in srgb, var(--on-surface) 7%, var(--mine)); }
+.sq-h { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; font-weight: 500; }
+.sq-h > .i { width: 16px; height: 16px; }
+.sq-h .ca { gap: 4px; font-size: 13px; color: var(--on-surface); }
+.sq-h .av, .sq-h .av0 { --s: 18px; }
+.sq-site { font-weight: 400; }
+.sq-t { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .sh-main { display: block; padding: 8px 12px; border-radius: var(--r-md); color: var(--on-surface); }
 .sh-main:hover { background: var(--hover); text-decoration: none; }
 .sh.mine .sh-main { background: var(--mine); }
@@ -1064,6 +1098,9 @@ a.badge { text-decoration: none; }
   .pbody .ava { width: 88px; height: 88px; margin-top: -44px; }
 }
 @media (max-width: 599px) {
+  .rm-item { grid-template-columns: minmax(0, 1fr); padding: 12px 14px; }
+  .rm-arrow { display: none; }
+  .rm-now { padding: 10px 0 0; border-left: 0; border-top: 1px solid var(--outline-variant); }
   .guard-card { padding: 16px; }
   .guard-list, .guard-hint, .guard-card .btn-row, .guard-card > .small, .confirm-card .btn-row, .cc-warn { margin-left: 0; }
   .confirm-card { padding: 16px; }

@@ -44,6 +44,7 @@ RAW_DIRS = {"posts": ".json.gz", "post-trees": ".json.gz", "threads": ".json.gz"
 RAW_FILES = ("profile.json.gz", "assets.json.gz")
 MEDIA_SHARE = 7     # a quick check hashes ~1/7 of the archive's media bytes: daily syncs go over all of them in a week
 MEDIA_MIN = 64 << 20
+HASH_THREADS = 8    # files are small and many: opening them (antivirus included) costs more than hashing
 MAX_ATTEMPTS = 3    # a download for a repair that failed in this many syncs ends as lost
 LOG_KEEP = 300
 
@@ -347,10 +348,9 @@ class Check:
         rows = {r["path"]: dict(r) for r in db.execute("SELECT path, sha256, size, at FROM files")}
         disk = self.raw_files()
         todo = sorted(set(rows) | set(disk) | self.expected())
-        for i, r in enumerate(todo):
-            if i % 200 == 0:
-                self.cancel()
-                self.step("files", i, len(todo))
+        hashes = hash_files([disk[r] for r in todo if r in disk], self.cancel,
+                            lambda i, n: self.step("files", i, n))
+        for r in todo:
             row = rows.get(r)
             p = disk.get(r)
             if p is None:
@@ -361,10 +361,8 @@ class Check:
                     continue
                 self.problem(r, row, "missing")
                 continue
-            try:
-                sha = file_sha256(p)
-                size = p.stat().st_size
-            except OSError:
+            sha, size = hashes.get(p, (None, 0))
+            if sha is None:
                 self.problem(r, row, "unreadable")
                 continue
             self.counts["files"] += 1
@@ -999,13 +997,39 @@ def manifest_clean(arch: Archive) -> bool:
             for p in (arch.raw / d).iterdir():
                 if p.is_file() and p.name.endswith(ext) and f"{d}/{p.name}" not in rows:
                     return False
-    for r, sha in rows.items():
+    paths = {arch.raw / r: sha for r, sha in rows.items()}
+    got = hash_files(list(paths))
+    return all(got.get(p, (None, 0))[0] == sha for p, sha in paths.items())
+
+
+def hash_files(paths: list[Path], cancel: Callable[[], None] | None = None,
+               progress: Callable[[int, int], None] | None = None) -> dict[Path, tuple[str | None, int]]:
+    """{path: (sha256 or None when unreadable, size)} — in a few threads."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(p: Path) -> tuple[str | None, int]:
         try:
-            if file_sha256(arch.raw / r) != sha:
-                return False
+            data = p.read_bytes()
         except OSError:
-            return False
-    return True
+            return None, 0
+        return hashlib.sha256(data).hexdigest(), len(data)
+    out: dict[Path, tuple[str | None, int]] = {}
+    with ThreadPoolExecutor(max_workers=HASH_THREADS, thread_name_prefix=_thread_prefix() + "hash") as pool:
+        for i, (p, res) in enumerate(zip(paths, pool.map(one, paths, chunksize=64))):
+            out[p] = res
+            if i % 500 == 0:
+                if cancel:
+                    cancel()
+                if progress:
+                    progress(i, len(paths))
+    return out
+
+
+def _thread_prefix() -> str:
+    """Worker threads keep the job's name prefix: the app routes their log lines to the job (web/jobs.py)."""
+    import threading
+    name = threading.current_thread().name
+    return name.split("-", 1)[0] + "-" if name.startswith("job") else ""
 
 
 def render_gate(arch: Archive) -> None:

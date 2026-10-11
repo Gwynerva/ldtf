@@ -4,6 +4,7 @@
   /u/<nick>/p/<id>/history/<hid>    one earlier version: what the next version changed (default) or the whole of it
   /u/<nick>/c/<id>/history          a comment: every version with the words that changed, removals and returns
   /u/<nick>/changes                 every change of the archive, newest first, with filters
+  /u/<nick>/removed                 what DTF lost and the archive kept: what it was -> removed (how, when)
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from ..blocks import render_blocks
 from ..guard import state_title
 from ..history import block_ops, summary, word_diff
-from ..normalize import comment_text
+from ..normalize import comment_text, media_src
 from ..state import unpack
 from ..util import count_label, short, ts_date, ts_human
 from ..viewdb import post_plain_text, slim_comment
@@ -270,8 +271,8 @@ def page_changes(v: "ArchiveView", event: str, kind: str, page: int) -> tuple[st
     def chip(label: str, on: bool, href: str) -> str:
         return f'<a class="chip{" on" if on else ""}" href="{E(href)}">{icon("check", cls="ck") if on else ""}{E(label)}</a>'
     chips = ('<div class="chips scroll filters">' + chip("Все", not event, link(e=None))
-             + "".join(chip(t, event == k, link(e=k)) for k, (_, t) in EVENTS.items()
-                       if k != "damaged" or damaged or event == k)
+             + "".join(chip(t, event == k, L.removed() if k == "removed" and event != k else link(e=k))
+                       for k, (_, t) in EVENTS.items() if k != "damaged" or damaged or event == k)
              + ('<span class="chips-div"></span>' + chip("Посты", kind == "post", link(k=None if kind == "post" else "post"))
                 + chip("Комментарии", kind == "comment", link(k=None if kind == "comment" else "comment"))
                 if v.comments_on else "") + "</div>")
@@ -307,6 +308,125 @@ def page_changes(v: "ArchiveView", event: str, kind: str, page: int) -> tuple[st
             + f'<div class="card list ch-list">{"".join(lis)}</div>'
             + pagination(page, npages, lambda n: link(page=n if n > 1 else None)) + since_note(v))
     return "Изменения на DTF", body
+
+
+# ---------------------------------------------------------------------- removed on DTF
+# the latest removal of each item that never came back (its last removed/restored event is a removal)
+REMOVED_NOW = ("h.event='removed' AND h.id = (SELECT h2.id FROM history h2 WHERE h2.kind=h.kind AND "
+               "h2.item_id=h.item_id AND h2.event IN ('removed','restored') ORDER BY h2.at DESC, h2.id DESC LIMIT 1)")
+
+
+def page_removed(v: "ArchiveView", kind: str, who: str, page: int) -> tuple[str, str]:
+    """«Удалённое на DTF»: every post or comment DTF lost while the archive kept it — what it was (the archived
+    content itself) and what happened (how, when LDTF noticed). A quiet page: no warning colours."""
+    L = v.links
+    where, args = [REMOVED_NOW], []
+    if kind in ("post", "comment"):
+        where.append("h.kind=?")
+        args.append(kind)
+    if not v.comments_on:
+        where.append("h.kind='post'")
+    if who in ("mine", "others") and v.comments_on:
+        where.append("(h.kind='post' OR c.mine=?)" if who == "mine" else "(h.kind='comment' AND c.mine=?)")
+        args.append(1 if who == "mine" else 0)
+    db = v.db()
+    w = " AND ".join(where)
+    join = "FROM history h LEFT JOIN comments c ON h.kind='comment' AND c.id=h.item_id"
+    total = db.execute(f"SELECT COUNT(*) {join} WHERE {w}", args).fetchone()[0]
+    npages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+    page = max(1, min(page, npages))
+    rows = db.execute(f"SELECT h.kind, h.item_id, h.entry_id, h.at, h.state, c.data, c.entry_id AS ceid {join} "
+                      f"WHERE {w} ORDER BY h.at DESC, h.id DESC LIMIT ? OFFSET ?",
+                      args + [PER_PAGE, (page - 1) * PER_PAGE]).fetchall()
+    pids = [r["item_id"] for r in rows if r["kind"] == "post"]
+    posts: dict[int, sqlite3.Row] = {}
+    for chunk in (pids[i:i + 500] for i in range(0, len(pids), 500)):
+        q = ",".join("?" * len(chunk))
+        posts.update({r["id"]: r for r in db.execute(f"SELECT id, date, title, lead, cover FROM posts WHERE id IN ({q})",
+                                                      chunk)})
+    eids = {r["ceid"] or r["entry_id"] for r in rows if r["kind"] == "comment"} - {None}
+    titles: dict[int, str] = {}
+    for chunk in (list(eids)[i:i + 500] for i in range(0, len(eids), 500)):
+        q = ",".join("?" * len(chunk))
+        titles.update({r[0]: r[1] or "" for r in db.execute(f"SELECT id, title FROM entries WHERE id IN ({q})", chunk)})
+    db.close()
+
+    def link(**ch: Any) -> str:
+        params = {"k": kind, "w": who, "page": None}
+        params.update(ch)
+        q = up.urlencode({k: val for k, val in params.items() if val})
+        return L.removed() + (f"?{q}" if q else "")
+
+    def chip(label: str, on: bool, href: str) -> str:
+        return f'<a class="chip{" on" if on else ""}" href="{E(href)}">{icon("check", cls="ck") if on else ""}{E(label)}</a>'
+    chips = ""
+    if v.comments_on:
+        chips = ('<div class="chips scroll filters">' + chip("Все", not kind and not who, link(k=None, w=None))
+                 + chip("Посты", kind == "post", link(k=None if kind == "post" else "post", w=None))
+                 + chip("Комментарии", kind == "comment", link(k=None if kind == "comment" else "comment"))
+                 + '<span class="chips-div"></span>'
+                 + chip("Свои", who == "mine", link(w=None if who == "mine" else "mine"))
+                 + chip("Чужие", who == "others", link(w=None if who == "others" else "others", k=None)) + "</div>")
+    items, day = [], None
+    for r in rows:
+        d = ts_date(r["at"])
+        if d != day:
+            day = d
+            items.append(f'<h2 class="rm-day">Замечено {E(d)}</h2>')
+        items.append(_removed_item(v, r, posts, titles))
+    head = page_head("Удалённое на DTF", "Что пропало с DTF, а в архиве осталось — таким, каким было",
+                     actions=btn("Все изменения", "text", "history", href=L.changes()), n=total if total else None)
+    if not items:
+        msg = ("Ничего не пропадало: всё, что есть в архиве, есть и на DTF. Если пост или комментарий удалят, "
+               "в архиве он останется — и появится здесь." if not (kind or who) else "С такими фильтрами ничего нет.")
+        return "Удалённое на DTF", head + chips + empty_state("history", "Удалённого нет", msg) + since_note(v)
+    body = (head + chips + pagination(page, npages, lambda n: link(page=n if n > 1 else None), compact=True)
+            + f'<div class="rm-list">{"".join(items)}</div>'
+            + pagination(page, npages, lambda n: link(page=n if n > 1 else None)) + since_note(v))
+    return "Удалённое на DTF", body
+
+
+def _removed_item(v: "ArchiveView", r: sqlite3.Row, posts: dict, titles: dict) -> str:
+    L = v.links
+    state = state_title(r["state"]) if r["state"] else "пропал с DTF"
+    if r["kind"] == "post":
+        p = posts.get(r["item_id"])
+        if p is None:
+            return ""
+        cov = json.loads(p["cover"]) if p["cover"] else None
+        thumb = ""
+        if cov and cov.get("kind") != "video" and not cov.get("gone"):
+            thumb = f'<img class="rm-thumb" loading="lazy" src="{E(media_src(cov, "/"))}" alt="">'
+        was = (f'<a class="rm-post" href="{E(L.post(p["id"]))}">{thumb}<span class="rm-pt">'
+               f'<b>{E(p["title"] or "Без заголовка")}</b>'
+               + (f'<span class="rm-lead">{E(p["lead"])}</span>' if p["lead"] else "")
+               + f'<span class="rm-sub">Пост от {ts_date(p["date"])}</span></span></a>')
+        open_href, hist = L.post(p["id"]), L.post_history(p["id"])
+    else:
+        c = unpack(r["data"]) if r["data"] else None
+        if c is None:
+            return ""
+        eid = r["ceid"] or r["entry_id"]
+        t = titles.get(eid or 0)
+        was = (v.cv.one(dict(c, site=None, hist=0), eid, False, cls="rm-c")
+               + (f'<span class="rm-sub">в посте «{E(short(t, 90))}»</span>' if t else ""))
+        open_href, hist = L.go(c["id"]), L.comment_history(c["id"])
+    return (f'<article class="rm-item card"><div class="rm-was"><span class="rm-lab">Было</span>{was}</div>'
+            f'<span class="rm-arrow" aria-hidden="true">{icon("arrow_forward")}</span>'
+            f'<div class="rm-now"><span class="rm-lab">Сейчас на DTF</span>'
+            f'<span class="rm-state">{icon("delete")}{E(state[0].upper() + state[1:])}</span>'
+            f'<span class="rm-sub">LDTF заметил {ts_human(r["at"])}</span>'
+            f'<span class="rm-acts"><a href="{E(open_href)}">Открыть в архиве</a> · <a href="{E(hist)}">История</a></span>'
+            f'</div></article>')
+
+
+def removed_count(v: "ArchiveView") -> int:
+    db = v.db()
+    try:
+        q = f"SELECT COUNT(*) FROM history h WHERE {REMOVED_NOW}" + ("" if v.comments_on else " AND h.kind='post'")
+        return db.execute(q).fetchone()[0]
+    finally:
+        db.close()
 
 
 def changes_count(v: "ArchiveView") -> int:

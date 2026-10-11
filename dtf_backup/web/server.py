@@ -587,7 +587,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect(target, 302) if target else self.not_found("Комментарий не найден в архиве")
         guard = ((app.account(nick) or {}).get("guard") or {}).get("ts")   # the page chrome shows the guard banner
         key = (nick, sub, qs("q"), qs("t"), qs("y"), qs("s"), qs("page"), qs("exact"), tuple(q.get("g") or ()), guard,
-               qs("full"), qs("e"), qs("k"))
+               qs("full"), qs("e"), qs("k"), qs("w"))
 
         def build() -> str | None:
             res, active, wide = None, "", False
@@ -602,6 +602,9 @@ class Handler(BaseHTTPRequestHandler):
             elif sub == "/changes":
                 page = int(qs("page", "1")) if qs("page", "1").isdigit() else 1
                 res, active = history_pages.page_changes(v, qs("e"), qs("k"), page), "index"
+            elif sub == "/removed":
+                page = int(qs("page", "1")) if qs("page", "1").isdigit() else 1
+                res, active = history_pages.page_removed(v, qs("k"), qs("w"), page), "index"
             elif sub == "/search":
                 page = int(qs("page", "1") or 1) if qs("page", "1").isdigit() else 1
                 gs = q.get("g") or ["1"]  # checkbox + hidden fallback: "1" when checked

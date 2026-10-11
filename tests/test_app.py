@@ -188,11 +188,15 @@ class AppTest(unittest.TestCase):
         code, body, _ = self.get("/u/tester/c/2026-09")
         self.assertEqual(body.count('class="mc card'), 2)
         self.assertIn('id="c24"', body)
+        a, b = body.index('id="c21"'), body.index('id="c22"')   # the answer is nested under what it answers
+        self.assertIn('class="c-kids"', body[a:b])
         self.assertIn('<blockquote class="cq">цитата</blockquote>', body)
         code, body, _ = self.get("/u/tester/search?q=катана")
         self.assertIn("<mark>катану</mark>", body)
         self.assertIn("<mark>катаной</mark>", body)
-        self.assertIn("sh-ctx", body)                          # parent comment shown as context
+        self.assertIn("sh-quote", body)                        # what a found comment answers: a reply quote
+        self.assertIn("В ответ", body)
+        self.assertNotIn("sh-ctx", body)
         code, body, _ = self.get("/u/tester/search?q=rfnfyf")
         self.assertIn("Искать как написано", body)
         code, body, _ = self.get("/u/tester/search?q=rfnfyf&exact=1")

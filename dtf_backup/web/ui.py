@@ -449,7 +449,12 @@ class CommentView:
                 norms.append({"type": t, "supported": False, "raw": m, "error": str(e)})
         return "".join(hs), mds, norms
 
-    def one(self, c: dict, post_id: int | None, anchor: bool, toggle: int = 0, cls: str = "") -> str:
+    def reply_mark(self, parent: dict) -> str:
+        """«в ответ Имя» in a comment's header: for comments shown one under another without indentation."""
+        return (f'<span class="c-re" title="Ответ на комментарий выше">{icon("reply")}в ответ '
+                f'{E(self.author_name(parent.get("author")))}</span>')
+
+    def one(self, c: dict, post_id: int | None, anchor: bool, toggle: int = 0, cls: str = "", extra: str = "") -> str:
         mine = c.get("author") == self.uid
         name = E(self.author_name(c.get("author")))
         pid = post_id or (c.get("entry") or {}).get("id")
@@ -493,7 +498,7 @@ class CommentView:
                     f'+{rub(c["donated"])}</span>') + foot
         don = " c-don" if c.get("donation") else ""
         return (f'<div class="c{" mine" if mine else ""}{don}{removed}{" " + cls if cls else ""}"{idattr} data-id="{c["id"]}">'
-                f'<div class="c-h"><span class="ca">{self.avatar_html(c.get("author"))}{name}</span>{date_link}'
+                f'<div class="c-h"><span class="ca">{self.avatar_html(c.get("author"))}{name}</span>{date_link}{extra}'
                 f'{"".join(badges)}{tog}</div>{f"<div class=c-t>{text}</div>" if text else ""}'
                 f'{f"<div class=\"c-m pswp-gallery\">{media_h}</div>" if media_h else ""}'
                 f'{f"<div class=c-f>{foot}</div>" if foot else ""}</div>')

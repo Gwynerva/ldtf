@@ -293,6 +293,28 @@ class HistoryPagesTest(unittest.TestCase):
         code, body = self.get("/u/tester/")
         self.assertIn("/u/tester/changes", body)
 
+    def test_removed_page(self) -> None:
+        code, body = self.get("/u/tester/removed")
+        self.assertEqual(code, 200)
+        self.assertIn("Удалённое на DTF", body)
+        self.assertIn("rm-item", body)
+        self.assertIn("Было", body)
+        self.assertIn("Удалён модератором", body)                    # what happened, said once (not a chip as well)
+        self.assertNotIn('class="c-site"', body)
+        self.assertIn("Чужой комментарий к посту 5", body)            # what it was: the archived text itself
+        self.assertNotIn("banner warn", body)                         # quiet: no warning colours
+        self.assertIn("Удалённое на DTF</h1>", body.replace('<span class="n">1</span>', ""))
+        self.assertEqual(body.count('class="rm-item card"'), 1)
+        code, body = self.get("/u/tester/removed?w=mine")
+        self.assertNotIn("rm-item", body)                             # only a guest's comment is gone
+        self.assertIn("С такими фильтрами ничего нет", body)
+        code, body = self.get("/u/tester/removed?k=post")
+        self.assertNotIn("rm-item", body)
+        code, body = self.get("/u/tester/")
+        self.assertIn("/u/tester/removed", body)                      # the home page: «1 удалено на DTF»
+        code, body = self.get("/u/tester/changes")
+        self.assertIn('href="/u/tester/removed"', body)              # «Удаления» leads to the page
+
 
 if __name__ == "__main__":
     unittest.main()

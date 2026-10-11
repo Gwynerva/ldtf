@@ -148,8 +148,8 @@
     var out = [], p = node.parentElement && node.parentElement.closest(".c-node");
     while (p) { out.unshift(p.querySelector(":scope > .c")); p = p.parentElement && p.parentElement.closest(".c-node"); }
     var art = node.closest("article.mc");
-    if (art) {  // month pages: the flat context chain above the user's comment
-      var flat = art.querySelectorAll(":scope > details.ctx-more .c, :scope > .c-node.ctx > .c");
+    if (art) {  // month pages: the collapsed chain above the comment answered (that one is a real ancestor node)
+      var flat = art.querySelectorAll(":scope > details.ctx-more .c");
       out = Array.prototype.slice.call(flat).concat(out);
     }
     return out.filter(Boolean);

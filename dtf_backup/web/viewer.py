@@ -19,13 +19,13 @@ from ..reactions import Reactions
 from ..scope import comments_kept
 from ..search.engine import has_index, search
 from ..state import Archive, unpack
-from ..util import COMMENTS, MSK, POSTS, count_label, human_bytes, num, plural, rub, ts_date, ts_human
+from ..util import COMMENTS, MSK, POSTS, count_label, human_bytes, num, plural, rub, short, ts_date, ts_human
 from ..viewdb import group_view, open_view, view_meta
 from .icons import icon
-from .history_pages import changes_count
+from .history_pages import changes_count, removed_count
 from .insights import donations_total
-from .ui import (MONTHS_SHORT, CommentView, Links, badge, banner, btn, empty_state, fold, icon_btn,
-                 mi, month_title, page_head, pager, pagination, sec_head, stat)
+from .ui import (KIDS_OPEN, MONTHS_SHORT, CommentView, Links, badge, banner, btn, empty_state, fold, icon_btn,
+                 mi, month_title, more_btn, page_head, pager, pagination, sec_head, stat)
 
 E = html.escape
 
@@ -139,12 +139,14 @@ def page_home(v: ArchiveView) -> tuple[str, str]:
     desc = (prof.get("description") or "").strip()
     donated = donations_total(v)
     changed = changes_count(v)
+    removed = removed_count(v) if changed else 0
     stats = (stat(num(counts["posts"]), plural(counts["posts"], *POSTS), v.links.posts()) +
              (stat(num(counts["my_comments"]), plural(counts["my_comments"], *COMMENTS), v.links.comments())
               if v.comments_on else "") +
              (stat(rub(donated), "донаты", v.links.donations()) if donated else "") +
              (stat(num(changed), plural(changed, "изменение", "изменения", "изменений") + " на DTF", v.links.changes())
               if changed else "") +
+             (stat(num(removed), "удалено на DTF", v.links.removed()) if removed else "") +
              (stat(num(media_n), f"медиа · {human_bytes(media_size)}") if media_n else ""))
     more = lambda label, href: f'<a class="btn text" href="{E(href)}">{E(label)}{icon("chevron_right")}</a>'  # noqa: E731
     yl = "".join(f'<a class="chip" href="{E(v.links.comments())}#y{y}">{y}<span class="n">{num(n)}</span></a>'
@@ -365,14 +367,21 @@ def _group_html(v: ArchiveView, db: sqlite3.Connection, g: sqlite3.Row, cache: d
                              f'<a href="{E(comment_url(eid, cid))}"{EXT_LINK}>открыть на DTF</a></div>')
     else:
         by_id, chain = gv["by_id"], gv["chain"]
+        # the chain above, collapsed: one under another, each marked «в ответ <who>» (it answers the one before)
+        mark = lambda i: cv.reply_mark(by_id[chain[i - 1]]) if i else ""  # noqa: E731
         if len(chain) > 1:
-            flat = "".join(f'<div class="c-node ctx">{cv.one(by_id[a], eid, True)}</div>' for a in chain[:-1])
+            flat = "".join(f'<div class="c-node ctx">{cv.one(by_id[a], eid, True, extra=mark(i))}</div>'
+                           for i, a in enumerate(chain[:-1]))
             n = len(chain) - 1
             parts.append(fold(f"Ещё {n} выше по ветке", flat, "ctx-more"))
-        if chain:
-            parts.append(f'<div class="c-node ctx">{cv.one(by_id[chain[-1]], eid, True)}</div>')
         keep = {k: by_id[k] for k in gv["keep"]}
-        parts.append(cv.tree([gv["cur"]], keep, gv["kids"], eid, anchors=True))
+        tree = cv.tree([gv["cur"]], keep, gv["kids"], eid, anchors=True)
+        if chain:   # the comment answered: the answer is nested under it, as in a post's thread
+            last = len(chain) - 1
+            parts.append(f'<div class="c-node ctx">{cv.one(by_id[chain[-1]], eid, True, extra=mark(last))}{KIDS_OPEN}'
+                         f'{tree}</div>{more_btn()}</div>')
+        else:
+            parts.append(tree)
     parts.append("</article>")
     return "".join(parts)
 
@@ -503,19 +512,27 @@ def page_search(v: ArchiveView, q: str, kind: str, year: str, sort: str, page: i
         return f'<span class="ca">{v.cv.avatar_html(aid)}{E(v.cv.author_name(aid))}</span>'
 
     def comment_hit(h: Any) -> str:
+        """The comment found: its author and date first, then — if it answers someone — a quote of what it answers
+        (a reply quote, as messengers show it: inside the comment, labelled, not indented like a thread), then the
+        text with the words found."""
         c = cmts.get(h.ref) or {}
         snip, _ = mk.snippet(h.body, 300) if mk else (E(h.body[:300]), 0)
-        ctx = ""
-        par = pmap.get(c.get("replyTo") or 0)
-        if par:
-            ptxt = comment_text(par.get("text")).text
-            psnip, _ = mk.snippet(ptxt, 160) if mk else (E(ptxt[:160]), 0)
-            ctx = (f'<div class="sh-ctx" title="В ответ на комментарий">{icon("subdirectory_arrow_right")}'
-                   f'{who(par.get("author"))}<span>{psnip}</span></div>')
+        quote = ""
+        if c.get("replyTo"):
+            par = pmap.get(c["replyTo"])
+            if par:
+                ptxt = comment_text(par.get("text")).text or ("(без текста)" if not par.get("media") else "(вложение)")
+                gone = f'<span class="sq-site">· {E(state_title(par["site"]))}</span>' if par.get("site") else ""
+                quote = (f'<div class="sh-quote"><span class="sq-h">{icon("reply")}В ответ {who(par.get("author"))}'
+                         f'{gone}</span><span class="sq-t">{E(short(ptxt, 240))}</span></div>')
+            else:
+                quote = (f'<div class="sh-quote"><span class="sq-h">{icon("reply")}В ответ на комментарий, которого нет '
+                         f'в архиве</span></div>')
         media = mi("image", str(len(c["media"])), "Вложения") if c.get("media") else ""
-        return (f'<div class="sh{" mine" if h.kind == "c" else ""}">{ctx}<a class="sh-main" href="{E(v.links.go(h.ref))}">'
-                f'<div class="c-h">{who(h.author)}<span class="cd">{ts_human(h.date)}</span>{media}</div>'
-                f'<div class="sh-text">{snip}</div></a></div>')
+        site = f'<span class="c-site">{icon("history")}{E(state_title(c["site"]))}</span>' if c.get("site") else ""
+        return (f'<div class="sh{" mine" if h.kind == "c" else ""}"><a class="sh-main" href="{E(v.links.go(h.ref))}">'
+                f'<div class="c-h">{who(h.author)}<span class="cd">{ts_human(h.date)}</span>{media}{site}</div>'
+                f'{quote}<div class="sh-text">{snip}</div></a></div>')
 
     def post_hit(h: Any) -> str:
         snip, _ = mk.snippet(h.body, 360) if mk else (E(h.body[:360]), 0)
