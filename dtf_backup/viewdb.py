@@ -16,7 +16,8 @@ Also useful for agents (plain SQL):
   months(ym, comments, groups, pages); month_groups(ym, pos, page, entry_id, root_id, mine, ...)
   comment_loc(id, ym, page)                              where each owner's comment is shown
   history(id, kind, item_id, entry_id, at, event, state, version_date, sig, body)   versions and removals (history.py):
-      kind = post | comment; event = edit (body = the replaced version, zlib JSON) | removed (state = why) | restored
+      kind = post | comment; event = edit (body = the replaced version, zlib JSON) | removed (state = why) | restored |
+      damaged (the archive's copy of the version `sig` was damaged, no exact copy found: state = replaced | lost)
   post_blocks(post_id, idx, type, level)                every block of every post: level = full | generic |
       unsupported (blocks.block_level: how LDTF shows the type); the "Блоки DTF" page and the archive's block check
   search_docs(id, kind, ref, entry, date, author, title, body)   texts for search; kind: p = post,

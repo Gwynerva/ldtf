@@ -344,7 +344,9 @@ archive/                       библиотека приложения
 - `history.jsonl` — что менялось на DTF с тех пор, как LDTF ведёт архив: `kind (post|comment), id, postId, event, at,
   atIso, state?, versionDate?, version?`. `event`: `edit` — правка, в `version` прежняя версия (у поста `title, text,
   blocks`, у комментария `text, media`), `removed` — удалён на DTF (`state` — как именно; в архиве осталась прежняя
-  версия), `restored` — снова есть на DTF. Записываются только реальные изменения содержимого, не счётчики.
+  версия), `restored` — снова есть на DTF, `damaged` — копия этой версии в архиве была повреждена и точной копии не
+  нашлось (`state`: `replaced` — на DTF уже другая версия, она теперь текущая; `lost` — на DTF её нет). Записываются
+  только реальные изменения содержимого, не счётчики.
 - `users.json` — авторы: `id -> {{name, nickname, uri, avatar}}`.
 - `reactions.json` — каталог реакций: `id, label, type, polarity (positive|negative), retired, static/animated`.
   Поле `reactions`: `{{total, positive, negative, items[{{id, count, polarity, label?, unknown?}}]}}`. DTF считает любую
