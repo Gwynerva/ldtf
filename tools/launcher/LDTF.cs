@@ -81,7 +81,9 @@ static class Launcher
     static int Start(string[] args)
     {
         string pythonw = Path.Combine(Dir, "runtime", "pythonw.exe");
-        if (InTemp())
+        // a start by hand only: autostart and the restart after an update (--background) of an install that already
+        // lives there must not stop on a dialog nobody sees
+        if (Array.IndexOf(args, "--background") < 0 && InTemp())
         {
             Error("LDTF запущен прямо из zip-архива (или из временной папки).\n\n" +
                   "Распакуйте архив целиком в постоянную папку — например, C:\\LDTF — и запустите LDTF.exe оттуда. " +
