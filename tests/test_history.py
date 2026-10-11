@@ -311,7 +311,7 @@ class HistoryPagesTest(unittest.TestCase):
         code, body = self.get("/u/tester/removed?k=post")
         self.assertNotIn("rm-item", body)
         code, body = self.get("/u/tester/")
-        self.assertIn("/u/tester/removed", body)                      # the home page: «1 удалено на DTF»
+        self.assertIn("/u/tester/removed", body)                      # the home page: «1 удалено»
         code, body = self.get("/u/tester/changes")
         self.assertIn('href="/u/tester/removed"', body)              # «Удаления» leads to the page
 

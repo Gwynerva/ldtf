@@ -144,9 +144,9 @@ def page_home(v: ArchiveView) -> tuple[str, str]:
              (stat(num(counts["my_comments"]), plural(counts["my_comments"], *COMMENTS), v.links.comments())
               if v.comments_on else "") +
              (stat(rub(donated), "донаты", v.links.donations()) if donated else "") +
-             (stat(num(changed), plural(changed, "изменение", "изменения", "изменений") + " на DTF", v.links.changes())
+             (stat(num(changed), plural(changed, "изменение", "изменения", "изменений"), v.links.changes())
               if changed else "") +
-             (stat(num(removed), "удалено на DTF", v.links.removed()) if removed else "") +
+             (stat(num(removed), "удалено", v.links.removed()) if removed else "") +
              (stat(num(media_n), f"медиа · {human_bytes(media_size)}") if media_n else ""))
     more = lambda label, href: f'<a class="btn text" href="{E(href)}">{E(label)}{icon("chevron_right")}</a>'  # noqa: E731
     yl = "".join(f'<a class="chip" href="{E(v.links.comments())}#y{y}">{y}<span class="n">{num(n)}</span></a>'
