@@ -25,13 +25,16 @@ jobs:
         run: test "v$(python -c 'import dtf_backup; print(dtf_backup.__version__)')" = "$GITHUB_REF_NAME"
       - name: Tests
         run: python -X utf8 -m unittest discover -s tests
-      - name: Build LDTF-<version>-windows-x64.zip (embedded Python, LDTF.exe)
+      - name: Build LDTF-<version>-windows-x64.zip (embedded Python, LDTF.exe and its window)
         run: python -X utf8 tools/build_release.py
+      - name: Build LDTF-<version>-linux.tar.gz (the server without Docker; SHA256SUMS lists both)
+        run: python -X utf8 tools/build_release.py --linux
       - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: |
             dist/LDTF-*-windows-x64.zip
+            dist/LDTF-*-linux.tar.gz
             dist/SHA256SUMS
 
   docker:
@@ -78,4 +81,5 @@ jobs:
         run: |
           pre=""
           case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          cp tools/server/install.sh dist/install.sh   # curl -fsSLO …/releases/latest/download/install.sh
           gh release create "$GITHUB_REF_NAME" dist/* --title "LDTF ${GITHUB_REF_NAME#v}" --notes-file notes.md $pre

@@ -285,5 +285,50 @@ class HelperTest(unittest.TestCase):
             p.wait()
 
 
+
+class ServerUpdateTest(unittest.TestCase):
+    """The Linux server (install.sh + systemd): the app swaps its files itself, systemd starts the new version."""
+
+    def test_kind_and_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "release.json").write_text(json.dumps({"version": "1.6.0", "platform": "linux"}))
+            with mock.patch.object(update.os, "name", "posix"), mock.patch.object(update.config, "docker", lambda: False):
+                self.assertEqual(update.install_kind(root), "server")
+            with mock.patch.dict(update.os.environ, {"INVOCATION_ID": "x"}):
+                self.assertTrue(update.systemd())
+            with mock.patch.dict(update.os.environ, {}, clear=True):
+                self.assertFalse(update.systemd())
+        info = update.release_info({"tag_name": "v9.9.9", "assets": [
+            {"name": "LDTF-9.9.9-windows-x64.zip", "browser_download_url": "https://github.com/w"},
+            {"name": "LDTF-9.9.9-linux.tar.gz", "browser_download_url": "https://github.com/l"},
+            {"name": "SHA256SUMS", "browser_download_url": "https://github.com/s"}]})
+        self.assertEqual(info["zip_name"], "LDTF-9.9.9" + update.ASSET)
+
+    def test_swap_and_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "ldtf"
+            new = Path(d) / "new" / "ldtf"
+            for base, ver in ((root, "1.0"), (new, "2.0")):
+                (base / "dtf_backup").mkdir(parents=True)
+                (base / "dtf_backup" / "__init__.py").write_text(ver)
+                (base / "ldtf-run.sh").write_text("#!/bin/sh")
+                (base / "release.json").write_text(json.dumps({"version": ver, "files": ["dtf_backup", "ldtf-run.sh",
+                                                                                         "release.json"]}))
+            (root / "archive").mkdir()
+            (root / "archive" / "keep.txt").write_text("user data")
+            work = root / ".update"
+            work.mkdir()
+            with mock.patch.object(update, "APP_ROOT", root), mock.patch.object(update, "WORK", work),                     mock.patch.object(update, "__version__", "1.0"):
+                u = update.Updater(root / "archive", lambda: {})
+                u.kind = "server"
+                plan = u.plan(new, ["--background"], 8765)
+                u.swap_server(new, plan)
+            self.assertEqual((root / "dtf_backup" / "__init__.py").read_text(), "2.0")
+            self.assertEqual((work / "backup" / "1.0" / "dtf_backup" / "__init__.py").read_text(), "1.0")
+            self.assertEqual((root / "archive" / "keep.txt").read_text(), "user data")   # never touched
+            lines = (work / "pending").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(lines[1:], ["1.0", "2.0"])                 # for ldtf-run.sh to put back if 2.0 can't start
+
 if __name__ == "__main__":
     unittest.main()

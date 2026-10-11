@@ -2,6 +2,9 @@
 
 How LDTF was installed decides what an update is (install_kind):
   release  the zip of a release (release.json, runtime/, LDTF.exe): downloaded, checked and installed from the app
+  server   the Linux release (release.json of platform "linux", tools/server/install.sh): from the app when systemd
+           runs it (the app swaps its files and ends, systemd starts the new version, ldtf-run.sh rolls a version that
+           doesn't start back), else `sudo sh /opt/ldtf/install.sh --update`
   git      a clone of the repository: `git pull`
   docker   the container: `docker compose pull && docker compose up -d`
   other    the release page
@@ -24,6 +27,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -34,7 +38,8 @@ from .util import log, now_ts, write_json
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 WORK = APP_ROOT / ".update"
-PLATFORM = "windows-x64"
+PLATFORM = "windows-x64" if os.name == "nt" else "linux"
+ASSET = f"-{PLATFORM}.zip" if os.name == "nt" else f"-{PLATFORM}.tar.gz"
 CHECK_EVERY = 20 * 3600          # a daily check, a little early so the same hour each day works
 MAX_ZIP = 300 * 1024 * 1024
 ALLOWED_HOSTS = ("github.com", "api.github.com")   # and *.githubusercontent.com (release files)
@@ -48,7 +53,18 @@ def install_kind(root: Path = APP_ROOT) -> str:
         return "git"
     if os.name == "nt" and all((root / n).exists() for n in ("release.json", "LDTF.exe", "runtime/pythonw.exe")):
         return "release"
+    if os.name != "nt" and (root / "release.json").exists():
+        try:
+            if json.loads((root / "release.json").read_text(encoding="utf-8")).get("platform") == "linux":
+                return "server"
+        except (OSError, ValueError):
+            pass
     return "other"
+
+
+def systemd() -> bool:
+    """Started by systemd (it sets INVOCATION_ID): an ended process comes back (Restart=always in ldtf.service)."""
+    return bool(os.environ.get("INVOCATION_ID"))
 
 
 def parse_version(v: str) -> tuple[int, int, int, int]:
@@ -89,7 +105,7 @@ def release_info(data: dict) -> dict:
     """What LDTF needs of GitHub's description of a release."""
     tag = str(data.get("tag_name") or "")
     assets = {a.get("name"): a for a in data.get("assets") or [] if isinstance(a, dict)}
-    z = next((a for n, a in assets.items() if n and n.endswith(f"-{PLATFORM}.zip")), None)
+    z = next((a for n, a in assets.items() if n and n.endswith(ASSET)), None)
     sums = assets.get("SHA256SUMS")
     return {"version": tag.lstrip("v"), "tag": tag, "name": data.get("name") or tag, "notes": data.get("body") or "",
             "url": data.get("html_url") or f"{RELEASES}/tag/{tag}", "published": data.get("published_at"),
@@ -127,8 +143,12 @@ class Updater:
         with self.lock:
             s = dict(self.state)
         s.update(kind=self.kind, current=__version__, latest=self.latest, checked_at=self.checked_at,
-                 available=self.available(), can_install=self.kind == "release" and bool((self.latest or {}).get("zip")))
+                 available=self.available(), can_install=self.can_install())
         return s
+
+    def can_install(self) -> bool:
+        """The app can install the update itself: the Windows release, or the Linux one under systemd."""
+        return (self.kind == "release" or (self.kind == "server" and systemd())) and bool((self.latest or {}).get("zip"))
 
     def _set(self, **kw: Any) -> None:
         with self.lock:
@@ -191,7 +211,7 @@ class Updater:
         """The release zip, checked against SHA256SUMS and unpacked into .update/staging; returns staging/LDTF."""
         info = self.latest or {}
         if not (info.get("zip") and info.get("sums")):
-            raise RuntimeError("у релиза нет архива для Windows или файла SHA256SUMS")
+            raise RuntimeError(f"у релиза нет архива для {'Windows' if os.name == 'nt' else 'Linux'} или файла SHA256SUMS")
         if info.get("zip_size") and info["zip_size"] > MAX_ZIP:
             raise RuntimeError("архив релиза подозрительно большой")
         WORK.mkdir(exist_ok=True)
@@ -224,21 +244,30 @@ class Updater:
             raise RuntimeError("контрольная сумма архива не совпала с SHA256SUMS — файл повреждён или подменён")
         staging = WORK / "staging"
         base = staging.resolve()
-        with zipfile.ZipFile(z) as zf:
-            for m in zf.infolist():
-                target = (staging / m.filename).resolve()
-                if not m.filename.startswith("LDTF/") or not str(target).startswith(str(base) + os.sep):
-                    raise RuntimeError(f"в архиве посторонний путь: {m.filename}")
-            zf.extractall(staging)
+        top = "LDTF/" if os.name == "nt" else "ldtf/"
+        if z.name.endswith(".tar.gz"):
+            with tarfile.open(z) as tf:
+                for m in tf.getmembers():
+                    if not (m.name == top.rstrip("/") or m.name.startswith(top)) or not (m.isfile() or m.isdir()):
+                        raise RuntimeError(f"в архиве посторонний путь: {m.name}")
+                tf.extractall(staging, filter="data")
+        else:
+            with zipfile.ZipFile(z) as zf:
+                for m in zf.infolist():
+                    target = (staging / m.filename).resolve()
+                    if not m.filename.startswith(top) or not str(target).startswith(str(base) + os.sep):
+                        raise RuntimeError(f"в архиве посторонний путь: {m.filename}")
+                zf.extractall(staging)
         z.unlink(missing_ok=True)
-        new = staging / "LDTF"
+        new = staging / top.rstrip("/")
         try:
             meta = json.loads((new / "release.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raise RuntimeError("в архиве нет release.json") from None
         if meta.get("version") != info["version"] or meta.get("platform") != PLATFORM:
             raise RuntimeError(f"в архиве версия {meta.get('version')} {meta.get('platform')}, ожидалась {info['version']}")
-        for need in ("LDTF.exe", "runtime/pythonw.exe", "dtf_backup/__init__.py"):
+        needs = (("LDTF.exe", "runtime/pythonw.exe") if os.name == "nt" else ("ldtf-run.sh",)) + ("dtf_backup/__init__.py",)
+        for need in needs:
             if not (new / need).exists():
                 raise RuntimeError(f"в архиве нет {need}")
         return new
@@ -269,8 +298,9 @@ class Updater:
     def install(self, busy: Any, stop_jobs: Any, args: list[str], port: int, quit_app: Any) -> None:
         """Download, wait for running syncs (`busy()`; the page may ask to stop them: stop_jobs), hand over to the
         helper and quit. Runs in a thread; the state tells the page how far it got."""
-        if self.kind != "release":
-            raise RuntimeError("обновление из приложения есть только у версии для Windows из архива релиза")
+        if not (self.kind == "release" or (self.kind == "server" and systemd())):
+            raise RuntimeError("обновление из приложения есть у версии для Windows из архива релиза и у сервера, "
+                               "установленного install.sh (systemd)")
         if not self._busy.acquire(blocking=False):
             return
 
@@ -283,7 +313,10 @@ class Updater:
                     time.sleep(2)
                 self._set(state="installing", progress=None)
                 log.info(f"[обновление] устанавливаю {self.latest['version']}: LDTF перезапустится")
-                self.spawn(self.plan(new, args, port))
+                if self.kind == "server":
+                    self.swap_server(new, self.plan(new, args, port))
+                else:
+                    self.spawn(self.plan(new, args, port))
                 time.sleep(0.5)
                 quit_app()
             except Exception as e:  # noqa: BLE001 - shown on the page, the app keeps working
@@ -292,6 +325,44 @@ class Updater:
             finally:
                 self._busy.release()
         threading.Thread(target=run, name="update-install", daemon=True).start()
+
+
+    def swap_server(self, new: Path, plan_path: Path) -> None:
+        """The Linux server: the files are swapped by this process (they stay readable to it while it ends), then it
+        ends and systemd starts the new version. `.update/pending` (backup, old version, new version) tells ldtf-run.sh
+        what to put back if the new one fails to start twice; the new version's first start removes it."""
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        backup = Path(plan["backup"])
+        shutil.rmtree(backup, ignore_errors=True)
+        backup.mkdir(parents=True)
+        names = sorted((set(plan["old_files"]) | set(plan["new_files"])) - {"archive", ".update", "", ".", ".."})
+        moved, copied = [], []
+        try:
+            for n in names:
+                if "/" in n or "\\" in n:
+                    continue
+                if (APP_ROOT / n).exists():
+                    os.replace(APP_ROOT / n, backup / n)
+                    moved.append(n)
+            for n in names:
+                src = new / n
+                if "/" in n or not src.exists():
+                    continue
+                (shutil.copytree if src.is_dir() else shutil.copy2)(src, APP_ROOT / n)
+                copied.append(n)
+            for sh in ("ldtf-run.sh", "install.sh"):
+                if (APP_ROOT / sh).exists():
+                    (APP_ROOT / sh).chmod(0o755)
+        except Exception:
+            for n in copied:
+                p = APP_ROOT / n
+                shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
+            for n in moved:
+                os.replace(backup / n, APP_ROOT / n)
+            raise
+        (WORK / "attempts").unlink(missing_ok=True)
+        (WORK / "pending").write_text(f"{backup}\n{plan['old_version']}\n{plan['new_version']}\n", encoding="utf-8")
+        log.info(f"[обновление] файлы {plan['new_version']} на месте; systemd запустит новую версию")
 
 
 # ---------------------------------------------------------------------- after a start
@@ -317,6 +388,8 @@ def take_result() -> dict | None:
             shutil.rmtree(q, ignore_errors=True) if q.is_dir() else q.unlink(missing_ok=True)
     elif plan and plan.get("new_version") == __version__:   # this start is the update
         shown = {"ok": True, "from": plan.get("old_version"), "to": __version__}
+        for name in ("pending", "attempts"):   # the server: the new version is up, ldtf-run.sh has nothing to undo
+            (WORK / name).unlink(missing_ok=True)
         try:
             write_json(WORK / "plan.json", dict(plan, started=True))
         except OSError:

@@ -2,5 +2,6 @@
 *
 !dtf_backup
 !LICENSE
+!docker-entrypoint.sh
 **/__pycache__
 **/*.pyc

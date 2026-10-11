@@ -1,0 +1,25 @@
+[Unit]
+Description=LDTF - local archive of DTF profiles
+Documentation=https://github.com/Gwynerva/ldtf
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ldtf
+Group=ldtf
+EnvironmentFile=/etc/ldtf/ldtf.env
+WorkingDirectory=/opt/ldtf
+ExecStart=/opt/ldtf/ldtf-run.sh
+# an update from the app ends the process: systemd starts the new version (ldtf-run.sh rolls a failed one back)
+Restart=always
+RestartSec=3
+# SIGTERM lets running syncs save their progress
+TimeoutStopSec=40
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

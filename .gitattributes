@@ -1,6 +1,7 @@
 * text=auto
 *.cmd text eol=crlf
 *.sh text eol=lf
+*.service text eol=lf
 Dockerfile text eol=lf
 *.png binary
 *.ico binary
@@ -13,6 +14,7 @@ showcase/ export-ignore
 LDTF*.cmd export-ignore
 ldtf.sh export-ignore
 Dockerfile export-ignore
+docker-entrypoint.sh export-ignore
 compose.yaml export-ignore
 .dockerignore export-ignore
 .gitattributes export-ignore

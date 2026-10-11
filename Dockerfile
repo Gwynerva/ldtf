@@ -9,19 +9,20 @@ LABEL org.opencontainers.image.title="LDTF" \
 
 # LDTF_DOCKER: no tray, autostart or self-update (the image is updated instead); TZ: the daily sync time is local time
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    LDTF_DOCKER=1 LDTF_ROOT=/data LDTF_HOST=0.0.0.0 LDTF_PORT=8765 TZ=Europe/Moscow
+    LDTF_DOCKER=1 LDTF_ROOT=/data LDTF_HOST=0.0.0.0 LDTF_PORT=8765 TZ=Europe/Moscow \
+    LDTF_UID=1000 LDTF_GID=1000
 
 WORKDIR /app
 COPY LICENSE ./
 COPY dtf_backup ./dtf_backup
-RUN python -m compileall -q dtf_backup \
-    && useradd --uid 1000 --user-group --no-create-home --shell /usr/sbin/nologin ldtf \
-    && mkdir /data && chown ldtf:ldtf /data
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN python -m compileall -q dtf_backup && mkdir /data
 
-USER ldtf
+# the entrypoint gives /data to LDTF_UID:LDTF_GID (a folder Docker made belongs to root) and runs LDTF as that user
 VOLUME /data
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('LDTF_PORT', '8765'), timeout=4)"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 # SIGTERM (docker stop) lets running syncs save their progress before the container goes
 CMD ["python", "-m", "dtf_backup", "serve"]

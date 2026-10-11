@@ -39,9 +39,28 @@ jobs:
       - name: Refuses the network without a password, starts with one, needs a login
         run: |
           ! docker run --rm ldtf:ci
-          docker run -d --name ldtf -e LDTF_PASSWORD=ci -p 8765:8765 ldtf:ci
+          # a host folder that belongs to root (what Docker makes for ./data): the entrypoint gives it to 1000:1000
+          mkdir data && sudo chown root:root data
+          docker run -d --name ldtf -e LDTF_PASSWORD=ci -p 8765:8765 -v "$PWD/data:/data" ldtf:ci
           for i in $(seq 30); do curl -fs http://127.0.0.1:8765/healthz && break; sleep 1; done
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/healthz)" = 200
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/)" = 303
+          test "$(stat -c %u data)" = 1000
+          test "$(docker exec ldtf id -u)" = 0 && test "$(docker top ldtf -o user,args | grep dtf_backup | awk '{print $1}')" != root
           docker stop ldtf
           docker logs ldtf
+
+  linux-release:
+    name: linux release (install.sh, systemd-less check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -X utf8 tools/build_release.py --linux
+      - name: The tarball holds the app and the server files
+        run: |
+          tar -tzf dist/LDTF-*-linux.tar.gz | grep -qx 'ldtf/dtf_backup/__init__.py'
+          tar -tzvf dist/LDTF-*-linux.tar.gz | grep -q -- '-rwxr-xr-x .* ldtf/install.sh'
+          sh -n tools/server/install.sh && sh -n tools/server/ldtf-run.sh

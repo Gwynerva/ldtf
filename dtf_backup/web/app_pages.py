@@ -489,7 +489,9 @@ def update_card(app: "App") -> str:
         res.setdefault("_seen", time.time())
         parts.append(banner("ok", f"LDTF обновлён до версии {E(str(res.get('to')))}.") if res.get("ok") else
                      banner("err", f"Обновление до {E(str(res.get('to')))} не удалось ({E(str(res.get('error') or ''))}) — "
-                                   f"LDTF вернулся к версии {E(str(res.get('from')))}. Подробности: .update/update.log."))
+                                   f"LDTF вернулся к версии {E(str(res.get('from')))}. Подробности: "
+                                   + ("журнал службы, <code>journalctl -u ldtf</code>." if kind == "server" else
+                                      ".update/update.log.")))
     parts.append(app.shell.form("/app", setting(
         "Проверять обновления автоматически", "Раз в день LDTF спрашивает GitHub, вышла ли новая версия. Без "
         "интернета проверка тихо пропускается.", switch("update_check", app.settings().get("update_check", True))),
@@ -509,16 +511,22 @@ def update_card(app: "App") -> str:
         date = f" от {ts_date(int(_iso_ts(latest.get('published'))))}" if latest.get("published") else ""
         notes = notes_html(latest.get("notes") or "", E)
         what = fold("Что нового", f'<div class="upd-notes">{notes}</div>', "fold upd-fold", " open") if notes else ""
-        if kind == "release":
+        if s["can_install"]:
             act = app.shell.form("/app/update/install", btn(f"Обновить до {v}", "", "upgrade"),
                                  confirm=f"LDTF скачает версию {v}, проверит её и перезапустится. Синхронизации, если идут, "
                                          f"сначала закончатся. Продолжить?")
+        elif kind == "server":
+            from ..update import APP_ROOT
+            act = (f'<p class="small muted">Обновите LDTF на сервере командой '
+                   f'<code>sudo sh {E(str(APP_ROOT / "install.sh"))} --update</code> — архивы останутся. (Из приложения '
+                   f'обновление доступно, когда LDTF запущен службой systemd, как его ставит install.sh.)</p>')
         elif kind == "git":
             act = (f'<p class="small muted">Эта копия LDTF — клон репозитория: обновите её командой '
                    f'<code>git pull</code> и перезапустите LDTF.</p>')
         elif kind == "docker":
-            act = ('<p class="small muted">LDTF работает в Docker: обновите образ на сервере командой '
-                   '<code>docker compose pull &amp;&amp; docker compose up -d</code> — архивы останутся.</p>')
+            act = ('<p class="small muted">LDTF работает в Docker: обновите образ на сервере — в папке с '
+                   '<code>compose.yaml</code> выполните <code>docker compose pull &amp;&amp; docker compose up -d</code>. '
+                   'Архивы в <code>./data</code> останутся.</p>')
         else:
             act = btn("Скачать с GitHub", "outlined sm", "download", href=latest.get("url") or "#",
                       attrs=' target="_blank" rel="noopener noreferrer"')

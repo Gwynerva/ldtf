@@ -1,8 +1,12 @@
-"""Build the Windows release of LDTF: dist/LDTF-<version>-windows-x64.zip + dist/SHA256SUMS.
+"""Build the releases of LDTF: dist/LDTF-<version>-windows-x64.zip, dist/LDTF-<version>-linux.tar.gz, dist/SHA256SUMS.
 
     python tools/build_release.py                    # files of HEAD (git archive), Python downloaded from python.org
     python tools/build_release.py --runtime runtime  # an existing embedded Python instead of the download
     python tools/build_release.py --worktree         # the working tree (uncommitted changes too) - for local tests
+    python tools/build_release.py --linux            # the Linux server release instead (any OS can build it)
+
+The Linux release (a tar.gz with one folder, ldtf/): the app, tools/server/ (install.sh, ldtf-run.sh, ldtf.service)
+and release.json of platform "linux" — install.sh puts it into /opt/ldtf as a systemd service, the app updates it.
 
 The zip holds one folder, LDTF/: LDTF.exe (the launcher and the app's window, tools/launcher/LDTF.cs built with csc.exe
 of .NET Framework 4, Windows only), webview2/ (the WebView2 SDK the window uses: from NuGet, checked by its sha256),
@@ -183,11 +187,53 @@ def build(args: argparse.Namespace) -> Path:
         for p in sorted(app.rglob("*")):
             if p.is_file():
                 z.write(p, Path("LDTF") / p.relative_to(app))
-    digest = hashlib.sha256(name.read_bytes()).hexdigest()
-    (out / "SHA256SUMS").write_text(f"{digest}  {name.name}\n", encoding="utf-8", newline="\n")
     shutil.rmtree(stage, ignore_errors=True)
-    print(f"{name} ({name.stat().st_size / 1e6:.1f} МБ), sha256 {digest}")
+    return finish(out, name)
+
+
+def finish(out: Path, name: Path) -> Path:
+    """SHA256SUMS of every release file in `out` of this version (both builds can land in one folder)."""
+    ver = version()
+    lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}"
+             for p in sorted(out.glob(f"LDTF-{ver}-*")) if p.is_file() and not p.name.endswith(".tmp")]
+    (out / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    print(f"{name} ({name.stat().st_size / 1e6:.1f} МБ), sha256 {hashlib.sha256(name.read_bytes()).hexdigest()}")
     return name
+
+
+SERVER_FILES = {"install.sh": 0o755, "ldtf-run.sh": 0o755, "ldtf.service": 0o644}
+
+
+def build_linux(args: argparse.Namespace) -> Path:
+    ver = version()
+    out = Path(args.out).resolve()
+    stage = out / "stage-linux"
+    shutil.rmtree(stage, ignore_errors=True)
+    app = stage / "ldtf"
+    app.mkdir(parents=True)
+    out.mkdir(parents=True, exist_ok=True)
+    app_files(app, args.worktree)
+    for p in app.glob("*.cmd"):   # Windows only
+        p.unlink()
+    for n in SERVER_FILES:
+        shutil.copy2(ROOT / "tools" / "server" / n, app / n)
+    files = sorted(p.name for p in app.iterdir())
+    meta = {"version": ver, "platform": "linux", "python": ">=3.12",
+            "built": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"), "files": files + ["release.json"]}
+    (app / "release.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    name = out / f"LDTF-{ver}-linux.tar.gz"
+    name.unlink(missing_ok=True)
+
+    def norm(ti: tarfile.TarInfo) -> tarfile.TarInfo:
+        ti.uid = ti.gid = 0
+        ti.uname = ti.gname = "root"
+        base = ti.name.split("/", 1)[-1]
+        ti.mode = SERVER_FILES.get(base, 0o755 if ti.isdir() else 0o644)
+        return ti
+    with tarfile.open(name, "w:gz", compresslevel=9) as t:
+        t.add(app, arcname="ldtf", filter=norm)
+    shutil.rmtree(stage, ignore_errors=True)
+    return finish(out, name)
 
 
 def main() -> None:
@@ -196,7 +242,11 @@ def main() -> None:
     ap.add_argument("--worktree", action="store_true", help="файлы рабочей копии (с незакоммиченными), а не HEAD")
     ap.add_argument("--out", default=str(ROOT / "dist"), help="куда положить zip и SHA256SUMS (по умолчанию dist/)")
     ap.add_argument("--exe-only", metavar="DIR", help="только собрать LDTF.exe (и webview2/) в папку DIR — для проверки")
+    ap.add_argument("--linux", action="store_true", help="собрать релиз для Linux-сервера (tar.gz) вместо Windows")
     args = ap.parse_args()
+    if args.linux:
+        build_linux(args)
+        return
     if args.exe_only:
         d = Path(args.exe_only).resolve()
         webview2(d / "webview2", Path(args.out).resolve())
