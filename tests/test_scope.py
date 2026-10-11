@@ -49,7 +49,7 @@ def add_comment_data(arch: Archive) -> None:
     f = arch.library / "media" / sha[:2] / f"{sha}.png"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_bytes(COMMENT_FILE)
-    db.execute("INSERT INTO store.blob VALUES (?,?,?,?,?,?)", (sha, len(COMMENT_FILE), "png", "image/png", None,
+    db.execute("INSERT INTO store.blob(sha256,size,ext,mime,sig,path) VALUES (?,?,?,?,?,?)", (sha, len(COMMENT_FILE), "png", "image/png", None,
                                                                f"{sha[:2]}/{sha}.png"))
     arch.queue_media([("comment-pic", None, "png")], "mc:24")
     arch.queue_media([("comment-pic", None, "png")], "tc:23")
@@ -190,9 +190,10 @@ class JobsTest(unittest.TestCase):
             lib = Path(d)
             a = make_archive(lib)
             a.close()
-            self.assertEqual(plan_stages(a, "sync"), ["profile", "posts", "comments", "threads", "media", "build"])
+            self.assertEqual(plan_stages(a, "sync"),
+                             ["integrity", "profile", "posts", "comments", "threads", "media", "build"])
             save_settings(a.settings_path, {"scope": "posts", "media": "off"})
-            self.assertEqual(plan_stages(a, "sync"), ["purge", "profile", "posts", "build"])   # comments still there
+            self.assertEqual(plan_stages(a, "sync"), ["purge", "integrity", "profile", "posts", "build"])   # comments still there
             self.assertEqual(plan_stages(a, "purge"), ["purge", "build"])
             self.assertEqual(plan_stages(a, "render"), ["build"])
 

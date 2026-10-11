@@ -89,7 +89,7 @@ def make_archive(library: Path, nick: str = "tester", *, uid: int = UID, post: i
     f = library / "media" / sha[:2] / f"{sha}.jpg"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_bytes(content)
-    arch.db.execute("INSERT OR IGNORE INTO store.blob VALUES (?,?,?,?,?,?)", (sha, len(content), "jpg", "image/jpeg", None,
+    arch.db.execute("INSERT OR IGNORE INTO store.blob(sha256,size,ext,mime,sig,path) VALUES (?,?,?,?,?,?)", (sha, len(content), "jpg", "image/jpeg", None,
                                                                           f"{sha[:2]}/{sha}.jpg"))
     arch.db.execute("UPDATE store.media_ref SET status='done', sha256=? WHERE key=?", (sha, IMG))
     arch.commit()

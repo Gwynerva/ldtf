@@ -464,6 +464,8 @@ def build_view(ds: Dataset, groups: "OrderedDict[str, list[dict]]", resolver: Me
     db.executemany("INSERT INTO meta VALUES (?,?)", [(k, json.dumps(v, ensure_ascii=False)) for k, v in meta.items()])
     db.commit()
     db.close()
+    with open(tmp, "rb+") as f:   # the view is also a copy integrity.py repairs from: on disk before the swap
+        os.fsync(f.fileno())
     _replace(tmp, final)
     return final
 

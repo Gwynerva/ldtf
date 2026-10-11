@@ -13,6 +13,7 @@ from typing import Callable
 
 from . import __version__
 from .blocks import Report
+from .integrity import render_gate
 from .normalize import MediaResolver
 from .reactions import Reactions
 from .state import Archive
@@ -39,6 +40,7 @@ def render(arch: Archive, progress: Progress | None = None) -> dict:
     if not arch.raw_profile().exists():
         raise SystemExit("Нет данных: архив ещё не синхронизирован.")
     step = progress or (lambda *_: None)
+    render_gate(arch)   # never from damaged files: the pages are a copy repairs come from (integrity.py)
     report = Report()
     ds = Dataset(arch).load(step)
     resolver = MediaResolver.for_library(arch.library)

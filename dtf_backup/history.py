@@ -151,6 +151,25 @@ def record_event(db: sqlite3.Connection, kind: str, item_id: int, event: str, st
     return True
 
 
+DAMAGED_STATES = {"replaced": "Копия в архиве была повреждена; с DTF загружена текущая версия — она отличается от той, "
+                              "что была в архиве",
+                  "lost": "Копия в архиве была повреждена, а на DTF этой версии уже нет — восстановить её не удалось"}
+
+
+def record_damaged(db: sqlite3.Connection, kind: str, item_id: int, sig: str | None, version_date: int | None,
+                   state: str, entry_id: int | None = None, at: int | None = None) -> bool:
+    """The archive's copy of a version was damaged and no exact copy of it was found (integrity.py): `replaced` — what
+    DTF has now differs from it, `lost` — DTF doesn't have it either. A marker without a body: `sig` and `version_date`
+    are those of the lost version (sig "" when even that is unknown); a version that survived elsewhere is kept as an
+    ordinary edit row. One marker per lost version."""
+    if db.execute("SELECT 1 FROM history WHERE kind=? AND item_id=? AND event='damaged' AND COALESCE(sig,'')=?",
+                  (kind, item_id, sig or "")).fetchone():
+        return False
+    db.execute("INSERT INTO history(kind, item_id, entry_id, at, event, state, version_date, sig) VALUES (?,?,?,?,?,?,?,?)",
+               (kind, item_id, entry_id, at or now_ts(), "damaged", state, version_date, sig or None))
+    return True
+
+
 def apply_events(db: sqlite3.Connection, events: list[tuple], at: int, entry_id: int | None = None) -> int:
     """What guard.merge_items saw in a tree or thread: ("edit", old, new) | ("removed", old, state) | ("restored", old)."""
     n = 0

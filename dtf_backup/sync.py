@@ -24,20 +24,22 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
+from . import integrity
 from .api import Dtf, comment_url, is_not_found, post_url
 from .context import prune_context
 from .guard import (ACCEPTABLE, COMMENTS_LIMIT, GuardTrip, account_problem, comment_stub, degraded, keep,
                     merge_items, post_loss, post_stub, post_wiped, posts_limit, site_summary,
                     state_title)
 from .guard import title as guard_title
-from .history import apply_events, ensure as ensure_history, import_legacy, record_edit, record_event
+from .history import apply_events, content_sig, ensure as ensure_history, import_legacy, record_edit, record_event
+from .integrity import Damaged, DbDamaged, read_raw, safe_unpack
 from .http import AdaptiveLimiter, FatalNetworkError, HttpClient
 from .media import MEDIA_MODES, Downloader, avatar_key, collect_media, effective_media, media_key, owner_sql, raw_key
 from .scope import drop_comments, has_comment_data
 from .settings import CHOICES, DEFAULTS, clamp
-from .state import META_GUARD, META_LAST_SYNC, Archive, pack, unpack
-from .util import (COMMENTS, DAY, HOUR, MSK, POSTS, count_label, human_bytes, log, now_ts, num, read_json_gz, short, ts_human,
-                   ts_month, ts_year, write_json_gz, write_jsonl_gz)
+from .state import META_GUARD, META_LAST_SYNC, Archive, pack
+from .util import (COMMENTS, DAY, HOUR, MSK, POSTS, count_label, gz_json, human_bytes, log, now_ts, num, short, ts_human,
+                   ts_month, ts_year, write_durable, write_json_gz)
 
 STAGES = ("posts", "comments", "threads", "media")
 COMMENT_STAGES = ("comments", "threads")   # not run for an archive of posts only (scope "posts")
@@ -56,6 +58,7 @@ class Exit(IntEnum):
     NETWORK = 2    # no network or DTF limited us: progress is kept, try later
     LOCKED = 3     # another process syncs this archive
     GUARD = 4      # stopped by the archive guard (meta "guard"): waits for the user
+    INTEGRITY = 5  # the archive's database is damaged and could not be restored (integrity.py): nothing was written
     STOPPED = 130  # cancelled / Ctrl+C: progress is kept
 
 
@@ -69,12 +72,15 @@ class Syncer:
                  full: bool = False, only: Iterable[str] | None = None, media: str = DEFAULTS["media"],
                  no_media: bool = False, rate: float = RATE, scope: str = DEFAULTS["scope"],
                  reporter: Callable[[str, dict], None] | None = None, cancel: threading.Event | None = None,
-                 net: tuple[Any, Any] | None = None, name: str = "", accept: bool = False):
+                 net: tuple[Any, Any] | None = None, name: str = "", accept: bool = False,
+                 verify: str = "quick", check_only: bool = False):
         """`media`: all | posts | off (media.MEDIA_MODES); `no_media` = "off".
         `scope`: all | posts — an archive of posts only never touches comments (no trees, feed, threads, their media).
         `net`: (api, media) limiters shared with other syncs (the app's NetPool leases); else own ones.
         `name`: thread name prefix, lets the app route this sync's log lines to its own job.
-        `accept`: the user reviewed the mass loss that stopped the previous sync and wants to go on."""
+        `accept`: the user reviewed the mass loss that stopped the previous sync and wants to go on.
+        `verify`: the integrity check that runs first (integrity.py): quick | full | off. `check_only`: «Проверить
+        целостность» — after the check the sync goes on only if something has to be downloaded again."""
         self.arch = arch
         self.reporter = reporter
         self.cancel = cancel
@@ -118,6 +124,11 @@ class Syncer:
         self._posts_archived = 0
         self._comments_lost = 0
         self._comment_samples: list[dict] = []
+        self.verify = verify if verify in ("quick", "full", "off") else "quick"   # None: quick
+        self.check_only = check_only
+        self.check: integrity.Check | None = None
+        self._repairs: dict[str, dict] = {}   # kind -> {id: repairs row}: items downloaded again for a repair
+        self.network_ran = False
 
     @classmethod
     def from_settings(cls, arch: Archive, user: str | None, s: dict, **overrides: Any) -> "Syncer":
@@ -128,14 +139,27 @@ class Syncer:
         return cls(arch, user, **params)
 
     def _write_tree(self, path: Any, items: list[dict], uid: Any, head: dict, threads: set | None = None,
-                    prune: list[int] | None = None) -> tuple[list[dict], dict, list]:
+                    prune: list[int] | None = None) -> dict:
         """Merge a fresh comment tree with the archived one (what DTF lost keeps its archived text, guard.merge_items)
         and write it. `threads`: compare only these threads (a branch answer); `prune`: keep only the context of these
-        comments (discussion threads). Returns (merged items, merge stats — with `prune` also _kept/_missing, history
-        events of the comments kept: the main thread records them, history.apply_events)."""
-        old = read_json_gz(path, {}).get("items")
+        comments (discussion threads). Returns {merged, st (merge stats — with `prune` also _kept/_missing), events
+        (history events: the main thread records them, history.apply_events), sig (the file written: (sha256, size)),
+        obj}. With events the file is not written here: `data` holds its bytes and the main thread writes it once the
+        replaced versions are committed (_save_tree) — a crash in between must not lose them.
+        A damaged archived file raises integrity.Damaged: it is never overwritten blindly (integrity.py repairs it)."""
+        old = read_raw(path, {}).get("items")
         if old and threads is not None:
-            old = [c for c in old if c.get("threadId") in threads]
+            roots = {c.get("id") for c in items if not c.get("replyTo")}
+            by = {c.get("id"): c for c in old}
+
+            def root(c: dict) -> Any:
+                seen = set()
+                while c.get("replyTo") and c["replyTo"] in by and c["id"] not in seen:
+                    seen.add(c["id"])
+                    c = by[c["replyTo"]]
+                return c.get("id")
+            # copies restored from the pages have no threadId: their root comment tells the thread
+            old = [c for c in old if c.get("threadId") in threads or (not c.get("threadId") and root(c) in roots)]
         events: list = []
         merged, st = merge_items(old, items, now_ts(), uid, events)
         out = merged
@@ -145,9 +169,26 @@ class Syncer:
             head = dict(head, missing=missing)
             kept = {c.get("id") for c in out}
             events = [e for e in events if e[1].get("id") in kept]
+        obj = {**head, "fetchedAt": now_ts(), "items": out}
+        res: dict[str, Any] = {"merged": merged, "st": st, "events": events, "path": path,
+                               "obj": {"fetchedAt": obj["fetchedAt"]}}   # for the manifest (integrity.content_at)
+        if events:
+            res["data"] = gz_json(obj)
+            return res
         self.check_cancel()   # a request of a stopped sync that came back late: its lock may already be someone else's
-        write_json_gz(path, {**head, "fetchedAt": now_ts(), "items": out})
-        return merged, st, events
+        res["sig"] = write_durable(path, gz_json(obj))
+        return res
+
+    def _save_tree(self, res: dict, at: int, entry_id: int | None) -> None:
+        """Main thread: the history events of a merged tree first (committed), then its file; the file in the
+        manifest."""
+        db = self.arch.db
+        if res.get("events"):
+            apply_events(db, res["events"], at, entry_id)
+            db.commit()
+        if "data" in res:
+            res["sig"] = write_durable(res["path"], res.pop("data"))
+        integrity.note(db, self.arch, res["path"], res["sig"], res["obj"])
 
     def report(self, stage: str, **fields: Any) -> None:
         """Structured progress for the app (the console keeps using the log)."""
@@ -199,6 +240,15 @@ class Syncer:
         mpool = ThreadPoolExecutor(max_workers=self.media_workers, thread_name_prefix=prefix + "media")
         code = Exit.OK
         try:
+            if self.verify != "off":
+                self.stage_integrity()
+            if self.check_only and not self.db_has_repairs():
+                for st in ("profile", *STAGES):
+                    self.report(st, status="skipped")
+                integrity.finish(self.arch, ())
+                log.info("Проверка целостности завершена: скачивать с DTF ничего не нужно.")
+                return code
+            self.network_ran = True
             for st in STAGES:
                 if st not in self.only:
                     self.report(st, status="skipped")
@@ -214,11 +264,17 @@ class Syncer:
             self.stats["site"] = dict(self.site)
             if self.site_items:
                 self.stats["site_items"] = self.site_items[:30]
+            if self.check is not None:
+                self.stats["integrity"] = self.check.summary()
             self.arch.set_meta(META_LAST_SYNC, {"ts": self.run_ts, "finished": now_ts(),
                                              "stages": sorted(self.only), "stats": self.stats})
+            integrity.finish(self.arch, self.only)
             if self.site:
                 log.warning(f"Изменения на DTF: пропало {site_summary(self.site)} — в архиве сохранены прежние версии.")
             log.info("Синхронизация завершена.")
+        except DbDamaged as e:
+            code = Exit.INTEGRITY
+            log.error(f"База архива повреждена ({e}) и не восстановлена — синхронизация не начиналась, архив не изменён.")
         except GuardTrip as g:
             code = Exit.GUARD
             self.arch.set_meta(META_GUARD, g.as_meta())
@@ -242,6 +298,30 @@ class Syncer:
             _drain([pool, mpool], 15.0)  # requests still on the wire finish before the lock is released
             db.commit()
         return code
+
+    # ------------------------------------------------------------------ integrity
+    def stage_integrity(self) -> None:
+        """The archive against what LDTF wrote (integrity.py): repairs what local copies can, queues downloads for
+        the rest (the stages below pick them up). A failure of the check itself never stops the sync: damaged files
+        are not overwritten anyway (read_raw)."""
+        self.report("integrity", status="running")
+        try:
+            self.check = integrity.Check(self.arch, mode="full" if self.verify == "full" else "quick",
+                                         media=self.media != "off" or self.verify == "full",
+                                         report=lambda **f: self.report("integrity", status="running", **f),
+                                         cancel=self.check_cancel).run()
+        except (DbDamaged, Cancelled, KeyboardInterrupt):
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception(f"[целостность] проверка не удалась: {e}")
+            self.report("integrity", status="error", error=str(e)[:200])
+            return
+        self.report("integrity", status="done", **self.check.summary())
+        self._repairs = {k: {i: dict(r) for i, r in integrity.pending(self.arch.db, k).items()}
+                         for k in ("post", "tree", "thread", "comment")}
+
+    def db_has_repairs(self) -> bool:
+        return self.arch.db.execute("SELECT 1 FROM repairs LIMIT 1").fetchone() is not None
 
     def run_parallel(self, pool: ThreadPoolExecutor, tasks: Iterable[Any], fn: Callable[[Any], Any],
                      on_done: Callable[[Any, Any, Exception | None], Iterable[Any] | None],
@@ -341,7 +421,7 @@ class Syncer:
                             {"id": uid, "name": name, "dtfName": prof.get("name"),
                              "posts": a.db.execute("SELECT COUNT(*) FROM posts").fetchone()[0],
                              "comments": a.db.execute("SELECT COUNT(*) FROM my_comments").fetchone()[0]})
-        write_json_gz(a.raw_profile(), prof)
+        integrity.note(a.db, a, a.raw_profile(), write_json_gz(a.raw_profile(), prof), prof)
         a.set_meta("user_ident", self.ident_override or str(ident))
         a.set_meta("user_id", uid)
         a.set_meta("user_uri", prof.get("uri"))
@@ -389,7 +469,11 @@ class Syncer:
         """Reaction/badge catalogs, accumulated over time: entries that disappear from the site are
         kept (marked retired) so old reactions still render."""
         a = self.arch
-        old = read_json_gz(a.raw_assets(), {})
+        try:
+            old = read_raw(a.raw_assets(), {})
+        except Damaged:   # the catalog is built again from DTF's; the damaged file is kept aside
+            integrity.set_aside(a, a.raw_assets())
+            old = {}
         out: dict[str, Any] = {"fetchedAt": now_ts()}
         n_new = 0
         for kind in ("reactions", "badges"):
@@ -403,7 +487,7 @@ class Syncer:
         for k, v in fresh.items():
             if k not in out:
                 out[k] = v
-        write_json_gz(a.raw_assets(), out)
+        integrity.note(a.db, a, a.raw_assets(), write_json_gz(a.raw_assets(), out), out)
         a.commit()
         log.info(f"Каталог реакций: {len(out['reactions'])}, значков: {len(out['badges'])} (новых картинок в очереди: {n_new})")
 
@@ -454,6 +538,18 @@ class Syncer:
                     self.full or row["tree_fetched_at"] is None or row["tree_status"] != "ok"
                     or row["tree_count"] != row["comments_count"] or (row["date"] or 0) >= recent):
                 tasks.append(("tree", pid))
+        # repairs (integrity.py): damaged posts and trees outside the listing (hidden from the profile) too
+        queued = set(tasks)
+        rep = self._repairs.get("post", {})
+        for pid in list(rep):
+            if pid in stubs:   # a placeholder on DTF now: the version the archive had is gone with it
+                integrity.settle(a, "post", pid, None, pid)
+            elif ("content", pid) not in queued:
+                tasks.append(("content", pid))
+        if self.scope != "posts":
+            for pid in self._repairs.get("tree", {}):
+                if ("tree", pid) not in queued and pid not in stubs:
+                    tasks.append(("tree", pid))
         trees = sum(1 for t in tasks if t[0] == "tree")
         log.info(f"[посты] в профиле {len(listed)} постов; к загрузке: "
                  f"{sum(1 for t in tasks if t[0] == 'content')} постов"
@@ -463,7 +559,7 @@ class Syncer:
             kind, pid = task
             if kind == "content":
                 path = a.raw_post(pid)
-                old = read_json_gz(path, None)
+                old = read_raw(path, None)   # damaged: the task fails, the file stays for integrity.py
                 try:
                     data = self.api.content(pid)
                     source = "content"
@@ -472,6 +568,8 @@ class Syncer:
                         raise
                     if old is not None and old.get("_source", "content") == "content":
                         return {"keep": "unavailable"}   # never replace a full post with its timeline copy
+                    if pid not in by_id:   # not even in the listing (a repair of a hidden post)
+                        return {"keep": "gone"}
                     data = dict(by_id[pid])
                     data["_source"] = "timeline"
                     source = "timeline"
@@ -482,10 +580,10 @@ class Syncer:
                 return {"data": data, "old": old, "dateModified": data.get("dateModified"), "source": source,
                         "media": collect_media(data, POST_SKIP_KEYS)}
             items = self.api.post_comments(pid)
-            counter = (by_id[pid].get("counters") or {}).get("comments", 0)
-            _, st, events = self._write_tree(a.raw_post_tree(pid), items, uid, {"postId": pid, "counter": counter})
+            counter = ((by_id.get(pid) or {}).get("counters") or {}).get("comments", len(items))
+            res = self._write_tree(a.raw_post_tree(pid), items, uid, {"postId": pid, "counter": counter})
             media = [(c["id"], collect_media(c.get("media") or [])) for c in items if c.get("media")]
-            return {"counter": counter, "n": len(items), "media": media, "st": st, "events": events}
+            return {"counter": counter, "n": len(items), "media": media, "tree": res}
 
         n_media = 0
 
@@ -495,11 +593,18 @@ class Syncer:
             ts = now_ts()
             if kind == "content":
                 if exc:
-                    db.execute("UPDATE posts SET content_status='error', content_error=? WHERE id=?", (str(exc)[:500], pid))
+                    db.execute("UPDATE posts SET content_status=CASE WHEN content_status='damaged' THEN 'damaged' "
+                               "ELSE 'error' END, content_error=? WHERE id=?", (str(exc)[:500], pid))
+                    integrity.attempt_failed(db, "post", pid)
                     log.warning(f"[посты] {pid}: ошибка загрузки поста: {exc}")
                     return
+                listed_mod = (by_id.get(pid) or {}).get("dateModified")
                 if res.get("keep"):
-                    db.execute("UPDATE posts SET content_modified=? WHERE id=?", (by_id[pid].get("dateModified"), pid))
+                    db.execute("UPDATE posts SET content_modified=? WHERE id=?", (listed_mod, pid))
+                    if pid in rep:
+                        db.execute("UPDATE posts SET content_status='ok' WHERE id=? AND content_status='damaged'",
+                                   (pid,))
+                        integrity.settle(a, "post", pid, None, pid)
                     self._post_lost(pid, res["keep"], ts)
                     return
                 old, data = res["old"], res["data"]
@@ -509,24 +614,30 @@ class Syncer:
                         changed = record_event(db, "post", pid, "restored", None, ts, pid) or changed
                     if changed:
                         db.commit()   # the replaced version is safe before the file is overwritten
-                write_json_gz(a.raw_post(pid), data)
+                path = a.raw_post(pid)
+                integrity.note(db, a, path, write_json_gz(path, data), data)
                 db.execute("UPDATE posts SET content_status='ok', content_error=NULL, content_fetched_at=?, "
-                           "content_modified=?, site_state=NULL, site_state_at=NULL WHERE id=?",
-                           (ts, by_id[pid].get("dateModified"), pid))
+                           "content_modified=?, site_state=NULL, site_state_at=NULL, content_sig=? WHERE id=?",
+                           (ts, listed_mod or data.get("dateModified"), content_sig("post", data), pid))
+                if pid in rep:
+                    integrity.settle(a, "post", pid, data, pid)
                 n_media += a.queue_media(res["media"], f"post:{pid}")
             else:
                 if exc:
-                    db.execute("UPDATE posts SET tree_status='error', tree_error=? WHERE id=?", (str(exc)[:500], pid))
+                    db.execute("UPDATE posts SET tree_status=CASE WHEN tree_status='damaged' THEN 'damaged' "
+                               "ELSE 'error' END, tree_error=? WHERE id=?", (str(exc)[:500], pid))
+                    integrity.attempt_failed(db, "tree", pid)
                     log.warning(f"[посты] {pid}: ошибка загрузки комментариев: {exc}")
                     return
                 if res["counter"] and res["n"] < 0.9 * res["counter"]:
                     log.warning(f"[посты] {pid}: получено {res['n']} комментариев из {res['counter']} по счётчику")
+                self._save_tree(res["tree"], ts, pid)
                 db.execute("UPDATE posts SET tree_status='ok', tree_error=NULL, tree_fetched_at=?, tree_count=? WHERE id=?",
                            (ts, res["counter"], pid))
+                integrity.settle_tree(a, "tree", pid, res["tree"]["events"], pid)
                 for cid, refs in res["media"]:
                     n_media += a.queue_media(refs, f"pc:{cid}")
-                apply_events(db, res["events"], ts, pid)
-                self._context_kept(res["st"])
+                self._context_kept(res["tree"]["st"])
 
         self.run_parallel(pool, tasks, work, done, "посты", total=len(tasks), stage="posts",
                           progress=lambda: {"listed": len(listed)})
@@ -610,11 +721,12 @@ class Syncer:
         record_event(a.db, "post", pid, "removed", state, ts, pid)
         path = a.raw_post(pid)
         title = ""
-        if path.exists():
-            raw = read_json_gz(path)
+        raw = load_raw_post(a, pid)
+        if raw is not None:
             title = raw.get("title") or ""
             if not raw.get("_site"):
-                write_json_gz(path, keep(raw, state, ts))
+                kept = keep(raw, state, ts)
+                integrity.note(a.db, a, path, write_json_gz(path, kept), kept)
         self.site[f"posts_{state}"] += 1
         self.site_items.append({"kind": "post", "id": pid, "state": state, "title": short(title, 120)})
         log.warning(f"[посты] {pid} «{short(title, 60)}»: {state_title(state)} — в архиве остаётся сохранённая версия")
@@ -635,6 +747,7 @@ class Syncer:
         ts = now_ts()
         new = 0
         n_media = 0
+        rep = self._repairs.setdefault("comment", {})
         for c in items:
             author = (c.get("author") or {}).get("id")
             if author is not None and author != uid:
@@ -646,26 +759,34 @@ class Syncer:
             if cur is None:
                 new += 1
             else:
-                old = unpack(cur["raw"])
-                why = degraded(old, c)
-                if why:
-                    if not cur["site_state"]:
-                        self._mark_comment(old, why, ts, dirty_years)
-                    continue
-                record_edit(db, "comment", old, c, ts, entry.get("id"))
-                if cur["site_state"]:   # it is on DTF again
-                    record_event(db, "comment", c["id"], "restored", None, ts, entry.get("id"))
+                old = safe_unpack(cur["raw"])
+                if old is None:   # damaged and not repaired (the check was off): the fresh copy is all there is
+                    old = {"_damaged": True}
+                    integrity.queue(db, "comment", c["id"], None, None, "damaged")
+                    rep.setdefault(c["id"], {})
+                if not old.get("_damaged"):
+                    why = degraded(old, c)
+                    if why:
+                        if not cur["site_state"]:
+                            self._mark_comment(old, why, ts, dirty_years)
+                        continue
+                    record_edit(db, "comment", old, c, ts, entry.get("id"))
+                    if cur["site_state"]:   # it is on DTF again
+                        record_event(db, "comment", c["id"], "restored", None, ts, entry.get("id"))
             db.execute(
-                "INSERT INTO my_comments(id,entry_id,date,level,reply_to,reply_count,thread_id,last_mod,is_removed,raw,seen_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET entry_id=excluded.entry_id, "
+                "INSERT INTO my_comments(id,entry_id,date,level,reply_to,reply_count,thread_id,last_mod,is_removed,raw,seen_at,sig) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET entry_id=excluded.entry_id, "
                 "date=excluded.date, level=excluded.level, reply_to=excluded.reply_to, reply_count=excluded.reply_count, "
                 "thread_id=excluded.thread_id, last_mod=excluded.last_mod, is_removed=excluded.is_removed, "
-                "raw=excluded.raw, seen_at=excluded.seen_at, site_state=NULL, site_state_at=NULL",
+                "raw=excluded.raw, seen_at=excluded.seen_at, sig=excluded.sig, site_state=NULL, site_state_at=NULL",
                 (c["id"], entry.get("id"), c.get("date"), c.get("level", 0), c.get("replyTo") or 0,
                  c.get("replyCount", 0), c.get("threadId"), c.get("lastModificationDate"),
-                 1 if c.get("isRemoved") else 0, pack(c), ts))
+                 1 if c.get("isRemoved") else 0, pack(c), ts, content_sig("comment", c)))
+            if c["id"] in rep:
+                integrity.settle(self.arch, "comment", c["id"], c, entry.get("id"))
+                rep.pop(c["id"], None)
             if c.get("date"):
-                dirty_years.add(ts_year(c["date"]))
+                self._dirty(dirty_years, ts_year(c["date"]))
             if c.get("media"):
                 n_media += self.arch.queue_media(collect_media(c["media"]), f"mc:{c['id']}")
         self._check_comments()
@@ -676,7 +797,7 @@ class Syncer:
                              (state, ts, pack(keep(old, state, ts)), old["id"]))
         record_event(self.arch.db, "comment", old["id"], "removed", state, ts, (old.get("entry") or {}).get("id"))
         if old.get("date"):
-            dirty_years.add(ts_year(old["date"]))
+            self._dirty(dirty_years, ts_year(old["date"]))
         self.site[f"comments_{state}"] += 1
         self._comments_lost += 1
         self.site_items.append({"kind": "comment", "id": old["id"], "state": state, "title": short(old.get("text"), 120),
@@ -708,10 +829,48 @@ class Syncer:
         for r in rows:
             if r["id"] in seen:
                 continue
-            old = unpack(r["raw"])
-            if not comment_stub(old):
+            old = safe_unpack(r["raw"])
+            if old is not None and not old.get("_damaged") and not comment_stub(old):
                 self._mark_comment(old, "gone", ts, dirty_years)
         self._check_comments()
+
+    def _dirty(self, dirty_years: set[str], year: str) -> None:
+        """A year of raw/my-comments to export again — remembered in the database too, so a sync that stops before
+        exporting leaves it for the next one (integrity.export_years)."""
+        if year in dirty_years:
+            return
+        dirty_years.add(year)
+        self.arch.set_meta(integrity.META_EXPORT_DIRTY,
+                           sorted(set(self.arch.get_meta(integrity.META_EXPORT_DIRTY) or []) | {year}))
+
+    def _repair_comments(self, dirty: set[str], counters: dict) -> None:
+        """Own comments no local copy restored exactly (integrity.py): downloaded one by one with their branch and
+        compared with the version the archive had (settle via _upsert_comments)."""
+        rep = self._repairs.get("comment") or {}
+        for cid in sorted(rep):
+            self.check_cancel()
+            try:
+                items = self.api.comment_branch(cid)
+            except FatalNetworkError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                if is_not_found(e):
+                    row = self.arch.db.execute("SELECT entry_id FROM my_comments WHERE id=?", (cid,)).fetchone()
+                    integrity.settle(self.arch, "comment", cid, None, row[0] if row else None)
+                    rep.pop(cid, None)
+                else:
+                    integrity.attempt_failed(self.arch.db, "comment", cid)
+                    log.warning(f"[комментарии] {cid}: не удалось скачать для восстановления: {e}")
+                continue
+            mine = [c for c in items if c.get("id") == cid]
+            if mine:
+                new, nm = self._upsert_comments(mine, dirty)
+                counters["media"] += nm
+            else:
+                row = self.arch.db.execute("SELECT entry_id FROM my_comments WHERE id=?", (cid,)).fetchone()
+                integrity.settle(self.arch, "comment", cid, None, row[0] if row else None)
+                rep.pop(cid, None)
+            self.arch.commit()
 
     def stage_comments(self, pool: ThreadPoolExecutor) -> None:
         a, db = self.arch, self.arch.db
@@ -725,6 +884,8 @@ class Syncer:
 
         try:
             self._comments_stages(pool, dirty, counters)
+            if self._repairs.get("comment"):
+                self._repair_comments(dirty, counters)
         finally:   # even when the guard stops the sync: the raw files show the kept versions
             self._export_my_comments(dirty)
         total = db.execute("SELECT COUNT(*) FROM my_comments").fetchone()[0]
@@ -826,17 +987,11 @@ class Syncer:
         self.arch.commit()
 
     def _export_my_comments(self, dirty_years: set[str]) -> None:
-        if not dirty_years:
+        years = set(dirty_years) | set(self.arch.get_meta(integrity.META_EXPORT_DIRTY) or [])
+        if not years:
             return
-        db = self.arch.db
-        by_year: dict[str, list[dict]] = defaultdict(list)
-        for row in db.execute("SELECT date, raw FROM my_comments ORDER BY date, id"):
-            y = ts_year(row["date"] or 0)
-            if y in dirty_years:
-                by_year[y].append(unpack(row["raw"]))
-        for y, rows in by_year.items():
-            write_jsonl_gz(self.arch.raw_my_comments(y), rows)
-        log.info(f"[комментарии] сырые данные обновлены за годы: {', '.join(sorted(by_year))}")
+        integrity.export_my_comments(self.arch, years)
+        log.info(f"[комментарии] сырые данные обновлены за годы: {', '.join(sorted(years))}")
 
     # ------------------------------------------------------------------ context threads
     def stage_threads(self, pool: ThreadPoolExecutor) -> None:
@@ -857,7 +1012,7 @@ class Syncer:
             n_threads = len({x[2] or f"c{x[0]}" for x in lst})
             th = threads.get(eid)
             max_date = max(x[1] for x in lst)
-            if (self.full or th is None or max(ids) > (th["max_my_comment_id"] or 0)
+            if (self.full or th is None or max(ids) > (th["max_my_comment_id"] or 0) or th["status"] == "damaged"
                     or (th["status"] == "error" and (th["attempts"] or 0) < 6)
                     or (th["status"] == "ok" and max_date >= window and (th["fetched_at"] or 0) < now - 6 * HOUR)):
                 tasks.append((eid, ids, n_threads))
@@ -884,13 +1039,13 @@ class Syncer:
                 raise
             # a branch answer says nothing about the post's other threads: only those threads are compared
             threads = {c.get("threadId") for c in items} if mode == "branch" else None
-            items, st, events = self._write_tree(a.raw_thread(eid), items, uid,
-                                                 {"entryId": eid, "mode": mode, "myCommentIds": ids},
-                                                 threads=threads, prune=ids)
+            tree = self._write_tree(a.raw_thread(eid), items, uid, {"entryId": eid, "mode": mode, "myCommentIds": ids},
+                                    threads=threads, prune=ids)
+            st = tree["st"]
             kept_n = st.pop("_kept")
             missing = st.pop("_missing")
-            return {"status": "ok", "mode": mode, "n_items": len(items), "n_kept": kept_n, "missing": len(missing),
-                    "st": st, "events": events}
+            return {"status": "ok", "mode": mode, "n_items": len(tree["merged"]), "n_kept": kept_n,
+                    "missing": len(missing), "st": st, "tree": tree}
 
         stats = defaultdict(int)
 
@@ -900,15 +1055,20 @@ class Syncer:
             if exc:
                 stats["error"] += 1
                 db.execute("INSERT INTO threads(entry_id,status,error,attempts) VALUES(?,?,?,1) "
-                           "ON CONFLICT(entry_id) DO UPDATE SET status='error', error=excluded.error, "
+                           "ON CONFLICT(entry_id) DO UPDATE SET status=CASE WHEN threads.status='damaged' THEN "
+                           "'damaged' ELSE 'error' END, error=excluded.error, "
                            "attempts=COALESCE(threads.attempts,0)+1", (eid, "error", str(exc)[:500]))
+                integrity.attempt_failed(db, "thread", eid)
                 return
             stats[res["status"]] += 1
             stats["missing"] += res.get("missing", 0)
             if res.get("st"):
                 self._context_kept(res["st"])
-            if res.get("events"):
-                apply_events(db, res["events"], ts, eid)
+            if res.get("tree"):
+                self._save_tree(res["tree"], ts, eid)
+                integrity.settle_tree(a, "thread", eid, res["tree"]["events"], eid)
+            elif eid in self._repairs.get("thread", {}):   # the post is gone from DTF: what survived stays
+                integrity.settle_tree(a, "thread", eid, [], eid)
             db.execute(
                 "INSERT INTO threads(entry_id,fetched_at,max_my_comment_id,mode,n_items,n_kept,missing,status,error,attempts) "
                 "VALUES(?,?,?,?,?,?,?,?,?,0) ON CONFLICT(entry_id) DO UPDATE SET fetched_at=excluded.fetched_at, "
@@ -938,8 +1098,12 @@ class Syncer:
                 mt = p.stat().st_mtime
                 if mt <= since:
                     continue
+                try:
+                    items = read_raw(p).get("items", [])
+                except (Damaged, FileNotFoundError):
+                    continue   # integrity.py repairs it; a new write gives it a new mtime
                 newest = max(newest, mt)
-                for c in read_json_gz(p).get("items", []):
+                for c in items:
                     if d == "threads" and c.get("media"):   # tree media are queued by the posts stage
                         context += a.queue_media(collect_media(c["media"]), f"tc:{c.get('id')}")
                     au = c.get("author") or {}
@@ -966,7 +1130,7 @@ class Syncer:
         wanted = f"EXISTS (SELECT 1 FROM main.media_use u WHERE u.key = r.key AND {owner_sql(self.media)})"
         # only the keys this archive needs (and its media mode allows); files other archives fetched are free
         rows = [dict(r) for r in db.execute(
-            f"SELECT r.key, r.sig, r.kind FROM store.media_ref r WHERE {todo} AND {wanted} ORDER BY r.rowid")]
+            f"SELECT r.key, r.sig, r.kind, r.expect_sha FROM store.media_ref r WHERE {todo} AND {wanted} ORDER BY r.rowid")]
         skipped = 0 if self.media == "all" else db.execute(
             f"SELECT COUNT(*) FROM store.media_ref r WHERE {todo} AND NOT {wanted} AND "
             f"EXISTS (SELECT 1 FROM main.media_use u WHERE u.key = r.key)").fetchone()[0]
@@ -979,6 +1143,7 @@ class Syncer:
                  + (f"; медиа комментариев не скачивается по настройке архива: {skipped}" if skipped else ""))
         dl = Downloader(self.client, a.media, tmp)
         st = defaultdict(int)
+        found: list[dict] = []
 
         def work(r: dict) -> dict:
             return dl.fetch(r["key"], r["kind"], list(by_sig.get(r["sig"], [])) if r["sig"] else [])
@@ -996,12 +1161,17 @@ class Syncer:
                                (res["sha256"], res["size"], res["ext"], res["mime"], r["sig"], res["path"]))
                     if r["sig"] and res["via"] == "download":
                         by_sig[r["sig"]].append({"sha256": res["sha256"], "size": res["size"], "path": res["path"]})
-                db.execute("UPDATE store.media_ref SET status='done', sha256=?, via=?, error=NULL, updated_at=? WHERE key=?",
-                           (res["sha256"], res["via"], ts, r["key"]))
+                db.execute("UPDATE store.media_ref SET status='done', sha256=?, via=?, error=NULL, updated_at=?, "
+                           "expect_sha=NULL WHERE key=?", (res["sha256"], res["via"], ts, r["key"]))
+                if r.get("expect_sha"):   # downloaded again after damage (integrity.py)
+                    found.append(integrity.finding("media", r["key"], "damaged",
+                                                   "media-exact" if res["sha256"] == r["expect_sha"] else "media-other"))
             elif status == "missing":
                 st["missing"] += 1
-                db.execute("UPDATE store.media_ref SET status='missing', error=?, updated_at=? WHERE key=?",
-                           (res.get("error"), ts, r["key"]))
+                db.execute("UPDATE store.media_ref SET status='missing', error=?, updated_at=?, expect_sha=NULL "
+                           "WHERE key=?", (res.get("error"), ts, r["key"]))
+                if r.get("expect_sha"):
+                    found.append(integrity.finding("media", r["key"], "damaged", "media-lost"))
             else:
                 st["error"] += 1
                 db.execute("UPDATE store.media_ref SET status='error', error=?, attempts=attempts+1, updated_at=? "
@@ -1013,6 +1183,7 @@ class Syncer:
                                                 "dedup": st["dedup"] + st["probe"], "shared": shared,
                                                 "missing": st["missing"], "errors": st["error"]})
         finally:
+            integrity.log_findings(a, found)
             a.commit()
         self.stats["media"] = dict(st, mode=self.media, skipped_by_mode=skipped)
         log.info(f"[медиа] готово: {dict(st)}")
@@ -1201,5 +1372,8 @@ def read_json(path) -> Any:
 
 
 def load_raw_post(arch: Archive, pid: int) -> dict | None:
-    p = arch.raw_post(pid)
-    return read_json_gz(p, None)
+    """The archived post; None if there is none or its file is damaged (integrity.py repairs it)."""
+    try:
+        return read_raw(arch.raw_post(pid), None)
+    except Damaged:
+        return None

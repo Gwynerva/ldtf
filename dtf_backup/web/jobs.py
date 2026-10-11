@@ -21,10 +21,11 @@ from ..scope import drop_locked, has_comment_data
 from ..state import META_GUARD, META_SYNC_ATTEMPT, Archive, gc_media, gc_pending, state_db
 from ..util import human_bytes, log
 
-KINDS = ("sync", "render", "purge")
+KINDS = ("sync", "render", "purge", "verify")   # verify: «Проверить целостность» (integrity.py)
 MAX_PARALLEL = 2   # archives synced at once: a long first download doesn't hold up the others' scheduled syncs
 STAGES = OrderedDict([
-    ("purge", "Удаление комментариев"), ("profile", "Профиль"), ("posts", "Посты"), ("comments", "Комментарии"),
+    ("purge", "Удаление комментариев"), ("integrity", "Проверка целостности"), ("profile", "Профиль"), ("posts", "Посты"),
+    ("comments", "Комментарии"),
     ("threads", "Контекст обсуждений"), ("media", "Медиафайлы"), ("build", "Сборка архива"),
 ])
 # job states: (title, icon); the app bar, the sync page and the tray show them as they come from snapshot()
@@ -33,7 +34,9 @@ ACTIVE = (QUEUED, RUNNING)
 JOB_STATES = {QUEUED: ("В очереди", "schedule"), RUNNING: ("Идёт синхронизация", "sync"), DONE: ("Готово", "check_circle"),
               CANCELLED: ("Остановлено — прогресс сохранён", "cancel"), ERROR: ("Ошибка", "error"),
               BLOCKED: ("Остановлено защитой архива", "gpp_maybe")}   # BLOCKED: the archive guard (guard.py)
-RUNNING_TITLES = {"sync": "Идёт синхронизация", "render": "Идёт пересборка страниц", "purge": "Удаление комментариев"}
+RUNNING_TITLES = {"sync": "Идёт синхронизация", "render": "Идёт пересборка страниц", "purge": "Удаление комментариев",
+                  "verify": "Идёт проверка целостности"}
+SYNC_KINDS = ("sync", "verify")   # jobs that run a Syncer (and can be stopped)
 STAGE_STATES = {"pending": ("ожидает", "radio_button_unchecked"), "running": ("идёт", "progress_activity"),
                 "done": ("готово", "check_circle"), "skipped": ("пропущено", "block"), "stopped": ("остановлено", "cancel"),
                 "error": ("ошибка", "error")}
@@ -54,7 +57,7 @@ def plan_stages(arch: Archive | None, kind: str) -> list[str]:
         return ["build"]
     if kind == "purge":
         return ["purge", "build"]
-    keys = ["profile", "posts", "comments", "threads", "media", "build"]
+    keys = ["integrity", "profile", "posts", "comments", "threads", "media", "build"]
     if arch is None:
         return keys
     s = arch.settings()
@@ -132,7 +135,7 @@ class Job:
             snap = {"id": self.id, "nick": self.nick, "kind": self.kind, "state": self.state, "title": title, "icon": ic,
                     "params": self.params, "created": self.created, "started": self.started, "finished": self.finished,
                     "error": self.error, "stages": stages, "log": list(self.log)[-80:],
-                    "stoppable": live and self.kind == "sync"}
+                    "stoppable": live and self.kind in SYNC_KINDS}
             snap["percent"] = job_percent(snap)
             return snap
 
@@ -241,7 +244,7 @@ class JobManager:
                 except ValueError:
                     pass
                 return True
-            if job.state == RUNNING and job.kind == "sync":
+            if job.state == RUNNING and job.kind in SYNC_KINDS:
                 job.cancel.set()
                 job.log.append("Останавливаю… прогресс сохраняется")
                 return True
@@ -393,14 +396,23 @@ class JobManager:
             fh.addFilter(_ThreadFilter(prefix))
             fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(threadName)s %(message)s"))
             log.addHandler(fh)
-            if job.kind == "sync":
+            if job.kind in SYNC_KINDS:
                 net = self.net
+                verify = job.kind == "verify"
                 syncer = Syncer.from_settings(
                     arch, job.params.get("user") or arch.get_meta("user_ident") or job.nick, arch.settings(),
                     workers=net.api_conn if net else None, media_workers=net.media_conn if net else None,
                     full=bool(job.params.get("full")), reporter=job.report, cancel=job.cancel,
-                    net=net.lease() if net else None, name=prefix.rstrip("-"), accept=bool(job.params.get("accept")))
+                    net=net.lease() if net else None, name=prefix.rstrip("-"), accept=bool(job.params.get("accept")),
+                    verify="full" if verify else None, check_only=verify)
                 code = syncer.run()
+                if code == Exit.INTEGRITY:
+                    job.report("build", {"status": "skipped"})
+                    raise RuntimeError("база архива повреждена и не восстановлена — подробности в журнале")
+                if verify and not syncer.network_ran and not (syncer.check and syncer.check.found):
+                    job.report("build", {"status": "skipped"})   # nothing changed: the pages stay as they are
+                    job.state = DONE
+                    return
                 if syncer.dropped:   # the archive was switched to posts only: free the comments' files
                     self._free_media(job)
                 if code == Exit.GUARD:   # the archive guard stopped it: nothing to build, no retry until the user decides

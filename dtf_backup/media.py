@@ -23,6 +23,7 @@ from typing import Any, Iterable
 
 from .api import MEDIA, NOT_FOUND, media_url
 from .http import HttpClient, HttpError
+from .util import file_sha256, replace_file
 
 MIME_EXT = {
     "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/gif": "gif",
@@ -237,11 +238,12 @@ class Downloader:
             sha = r.sha256 or ""
             final = self.blob_path(sha, ext)
             final.parent.mkdir(parents=True, exist_ok=True)
-            if final.exists() and final.stat().st_size == r.size:
+            # the same file is already stored only if its bytes say so: a damaged copy of the same size is replaced
+            if final.exists() and final.stat().st_size == r.size and file_sha256(final) == sha:
                 part.unlink(missing_ok=True)
                 via = "dedup"
             else:
-                os.replace(part, final)
+                replace_file(part, final)
                 via = "download"
             return {"status": "done", "sha256": sha, "size": r.size, "ext": ext, "via": via,
                     "mime": (r.headers.get("content-type") or "").split(";")[0],

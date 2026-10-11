@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -88,12 +89,18 @@ def ts_year(ts: int | float) -> str:
     return ts_to_dt(ts).strftime("%Y")  # type: ignore[union-attr]
 
 
-def atomic_write_bytes(path: Path, data: bytes) -> None:
+def atomic_write_bytes(path: Path, data: bytes, durable: bool = False) -> None:
+    """Replace `path` with `data` at once: readers see the old file or the new one, never a half. `durable`: the bytes
+    reach the disk before the rename (fsync), so a power loss can't leave an empty or garbled file in its place —
+    for what can't be made again (raw/, settings); pages and exports are rebuilt anyway."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+            if durable:
+                f.flush()
+                os.fsync(f.fileno())
         _replace(tmp, path)
     except BaseException:
         try:
@@ -101,6 +108,40 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         except OSError:
             pass
         raise
+    if durable:
+        fsync_dir(path.parent)
+
+
+def replace_file(src: Path | str, dst: Path) -> None:
+    """os.replace that waits out a reader (antivirus, the server sending the file) on Windows."""
+    _replace(str(src), dst)
+
+
+def file_sha256(path: Path, chunk: int = 1 << 20) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def fsync_dir(d: Path) -> None:
+    """Make a rename in `d` durable (POSIX; NTFS journals renames itself and can't open a folder this way)."""
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _replace(src: str, dst: Path, tries: int = 20) -> None:
@@ -127,11 +168,23 @@ def dumps(obj: Any, pretty: bool = False) -> str:
 
 
 def write_json(path: Path, obj: Any, pretty: bool = True) -> None:
-    atomic_write_text(path, dumps(obj, pretty) + "\n")
+    atomic_write_bytes(path, (dumps(obj, pretty) + "\n").encode("utf-8"), durable=True)
 
 
-def write_json_gz(path: Path, obj: Any) -> None:
-    atomic_write_bytes(path, gzip.compress(dumps(obj).encode("utf-8"), compresslevel=6, mtime=0))
+def write_durable(path: Path, data: bytes) -> tuple[str, int]:
+    """Write ready bytes durably; returns their (sha256, size)."""
+    atomic_write_bytes(path, data, durable=True)
+    return hashlib.sha256(data).hexdigest(), len(data)
+
+
+def gz_json(obj: Any) -> bytes:
+    """The bytes of a raw file: compact JSON, gzip without a timestamp — the same object always gives the same bytes."""
+    return gzip.compress(dumps(obj).encode("utf-8"), compresslevel=6, mtime=0)
+
+
+def write_json_gz(path: Path, obj: Any) -> tuple[str, int]:
+    """Write a raw file durably; returns its (sha256, size) for the archive's manifest (integrity.py)."""
+    return write_durable(path, gz_json(obj))
 
 
 _REQUIRED: Any = object()
@@ -145,11 +198,11 @@ def read_json_gz(path: Path, default: Any = _REQUIRED) -> Any:
         return json.load(f)
 
 
-def write_jsonl_gz(path: Path, rows: Iterable[Any]) -> int:
+def write_jsonl_gz(path: Path, rows: Iterable[Any]) -> tuple[str, int]:
+    """Write a gzipped JSON-lines file durably; returns its (sha256, size)."""
     parts = [dumps(r) for r in rows]
-    data = ("\n".join(parts) + ("\n" if parts else "")).encode("utf-8")
-    atomic_write_bytes(path, gzip.compress(data, compresslevel=6, mtime=0))
-    return len(parts)
+    return write_durable(path, gzip.compress(("\n".join(parts) + ("\n" if parts else "")).encode("utf-8"),
+                                             compresslevel=6, mtime=0))
 
 
 def read_jsonl_gz(path: Path) -> list[Any]:

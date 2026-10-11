@@ -156,6 +156,11 @@ def drop_comments(arch: Archive) -> dict[str, int]:
     for t in COMMENT_TABLES:
         db.execute(f"DELETE FROM main.{t}")
     db.execute("DELETE FROM main.history WHERE kind='comment'")   # their versions go with them
+    # integrity.py: their files leave the manifest, their repairs the queue, their copies the mirror (below)
+    for d in COMMENT_DIRS:
+        db.execute("DELETE FROM main.files WHERE path LIKE ?", (d + "/%",))
+    db.execute("DELETE FROM main.repairs WHERE kind IN ('comment', 'tree', 'thread')")
+    db.execute("DELETE FROM main.meta WHERE key='export_dirty'")
     db.execute("UPDATE main.posts SET tree_count=NULL, tree_fetched_at=NULL, tree_status=NULL, tree_error=NULL")
     db.execute(f"DELETE FROM main.meta WHERE key IN ({','.join('?' * len(COMMENT_META))})", COMMENT_META)
     g = a.get_meta(META_GUARD)
@@ -172,6 +177,8 @@ def drop_comments(arch: Archive) -> dict[str, int]:
         a.set_meta(META_LAST_SYNC, dict(ls, stats=st))
     n["uses"] = db.execute(f"DELETE FROM main.media_use WHERE {dropped_owners_sql(uid)}").rowcount
     db.commit()
+    for d in COMMENT_DIRS:
+        shutil.rmtree(a.state_dir / "backup" / "raw" / d, ignore_errors=True)
     for p in sorted(a.raw.glob(TRASH + "*")):
         shutil.rmtree(p, ignore_errors=True)
         if p.exists():

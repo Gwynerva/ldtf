@@ -18,6 +18,7 @@ import gzip
 import hashlib
 import http.client
 import json
+import os
 import socket
 import ssl
 import threading
@@ -380,6 +381,8 @@ class HttpClient:
                         f.write(chunk)
                         h.update(chunk)
                         size += len(chunk)
+                f.flush()
+                os.fsync(f.fileno())   # on disk before it is renamed into the store (media.py)
             expected = r.headers.get("content-length")
             if expected is not None and not gz and int(expected) != size:
                 raise http.client.IncompleteRead(b"", int(expected) - size)

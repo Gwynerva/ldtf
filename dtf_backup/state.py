@@ -69,6 +69,15 @@ CREATE TABLE IF NOT EXISTS history (
 CREATE INDEX IF NOT EXISTS history_item ON history(kind, item_id, at);
 CREATE INDEX IF NOT EXISTS history_entry ON history(entry_id);
 CREATE UNIQUE INDEX IF NOT EXISTS history_edit ON history(kind, item_id, sig) WHERE event = 'edit';
+
+-- integrity.py: every raw file as written (path relative to raw/; at = date of its content: dateModified, fetchedAt),
+-- backup_sha = what the mirror .state/backup/raw/ holds of it
+CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, sha256 TEXT NOT NULL, size INTEGER, at INTEGER,
+                                  backup_sha TEXT) WITHOUT ROWID;
+-- damaged items no local copy could restore exactly: the sync downloads them again and compares with expect_sig,
+-- the signature of the version the archive had (kind: post | comment | tree | thread)
+CREATE TABLE IF NOT EXISTS repairs (kind TEXT, item_id INTEGER, expect_sig TEXT, expect_date INTEGER, reason TEXT,
+                                    found_at INTEGER, attempts INTEGER DEFAULT 0, PRIMARY KEY (kind, item_id));
 """
 
 STORE_SCHEMA = """
@@ -85,6 +94,11 @@ CREATE TABLE IF NOT EXISTS store.blob (
 );
 CREATE INDEX IF NOT EXISTS store.blob_sig ON blob(sig);
 """
+# columns added to the shared store after its first release
+STORE_COLUMNS = {
+    "blob": (("checked_at", "INTEGER"),),        # last time integrity.py hashed the file
+    "media_ref": (("expect_sha", "TEXT"),),      # the damaged file this key had: compared with what comes again
+}
 
 
 # meta keys read outside the sync (scheduler, app pages, tray)
@@ -121,7 +135,14 @@ def _attach_store(db: sqlite3.Connection, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     db.execute("ATTACH DATABASE ? AS store", (str(path),))
     db.execute("PRAGMA store.journal_mode=WAL")
+    db.execute("PRAGMA store.synchronous=FULL")
     db.executescript(STORE_SCHEMA)
+    for table, added in STORE_COLUMNS.items():
+        cols = {r[1] for r in db.execute(f"PRAGMA store.table_info({table})")}
+        for col, typ in added:
+            if col not in cols:
+                db.execute(f"ALTER TABLE store.{table} ADD COLUMN {col} {typ}")
+    db.commit()
 
 
 def open_store(library: Path) -> sqlite3.Connection:
@@ -176,7 +197,9 @@ class Archive:
             db = sqlite3.connect(self.db_path, timeout=60)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA journal_mode=WAL")
-            db.execute("PRAGMA synchronous=NORMAL")
+            # FULL: a commit is on disk when it returns (NORMAL may lose the last ones on a power loss) — the history
+            # row of a replaced version is committed before its file is overwritten and must survive that
+            db.execute("PRAGMA synchronous=FULL")
             db.executescript(SCHEMA)
             _add_columns(db)
             _attach_store(db, self.store_path)
@@ -305,8 +328,10 @@ def peek_meta(root: Path, key: str) -> Any:
 
 
 ADDED_COLUMNS = {
-    "posts": (("site_state", "TEXT"), ("site_state_at", "INTEGER"), ("stats", "TEXT"), ("stats_at", "INTEGER")),
-    "my_comments": (("site_state", "TEXT"), ("site_state_at", "INTEGER")),
+    "posts": (("site_state", "TEXT"), ("site_state_at", "INTEGER"), ("stats", "TEXT"), ("stats_at", "INTEGER"),
+              ("content_sig", "TEXT")),       # history.content_sig of the version in raw/posts (integrity.py)
+    "my_comments": (("site_state", "TEXT"), ("site_state_at", "INTEGER"),
+                    ("sig", "TEXT")),         # history.content_sig of raw
 }
 
 
