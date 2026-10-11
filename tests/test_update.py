@@ -84,8 +84,11 @@ class DownloadTest(unittest.TestCase):
         self.env.start()
         self.work = mock.patch.object(update, "WORK", self.d / "work")
         self.work.start()
+        self.asset = mock.patch.object(update, "ASSET", "-windows-x64.zip")   # the Windows release on any OS
+        self.asset.start()
 
     def tearDown(self) -> None:
+        self.asset.stop()
         self.work.stop()
         self.env.stop()
         self.httpd.shutdown()

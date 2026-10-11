@@ -244,8 +244,9 @@ class Updater:
             raise RuntimeError("контрольная сумма архива не совпала с SHA256SUMS — файл повреждён или подменён")
         staging = WORK / "staging"
         base = staging.resolve()
-        top = "LDTF/" if os.name == "nt" else "ldtf/"
-        if z.name.endswith(".tar.gz"):
+        tar = z.name.endswith(".tar.gz")   # the Linux release; a zip is the Windows one
+        top = "ldtf/" if tar else "LDTF/"
+        if tar:
             with tarfile.open(z) as tf:
                 for m in tf.getmembers():
                     if not (m.name == top.rstrip("/") or m.name.startswith(top)) or not (m.isfile() or m.isdir()):
@@ -264,9 +265,10 @@ class Updater:
             meta = json.loads((new / "release.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raise RuntimeError("в архиве нет release.json") from None
-        if meta.get("version") != info["version"] or meta.get("platform") != PLATFORM:
+        platform = "linux" if tar else "windows-x64"
+        if meta.get("version") != info["version"] or meta.get("platform") != platform:
             raise RuntimeError(f"в архиве версия {meta.get('version')} {meta.get('platform')}, ожидалась {info['version']}")
-        needs = (("LDTF.exe", "runtime/pythonw.exe") if os.name == "nt" else ("ldtf-run.sh",)) + ("dtf_backup/__init__.py",)
+        needs = (("ldtf-run.sh",) if tar else ("LDTF.exe", "runtime/pythonw.exe")) + ("dtf_backup/__init__.py",)
         for need in needs:
             if not (new / need).exists():
                 raise RuntimeError(f"в архиве нет {need}")
