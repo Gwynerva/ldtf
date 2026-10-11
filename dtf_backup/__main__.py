@@ -1,4 +1,4 @@
-"""Command line: python -m dtf_backup {app,serve,sync,render,status,check-api,mcp} ...
+"""Command line: python -m dtf_backup {app,serve,sync,verify,render,status,check-api,mcp} ...
 
 LDTF (`app`: tray + local site, or `serve`: console) is the main interface; the other commands are for scripts,
 agents and automation. While LDTF is running, `sync` hands the job to it, so every sync on this computer shares
@@ -71,7 +71,8 @@ def delegate(running: dict, arch: Archive, args: argparse.Namespace, kind: str =
             return json.load(r)
     job = call("/api/jobs", {"nick": arch.nick, "kind": kind, "full": getattr(args, "full", False), "user": args.user,
                              "accept": getattr(args, "accept_deletions", False)})
-    print(f"Синхронизация @{arch.nick} выполняется в запущенном LDTF (задание {job['id']}): {base}{Links(arch.nick).sync().lstrip('/')}")
+    what = "Проверка целостности" if kind == "verify" else "Синхронизация"
+    print(f"{what} @{arch.nick} выполняется в запущенном LDTF (задание {job['id']}): {base}{Links(arch.nick).sync().lstrip('/')}")
     last, cancelled = "", False
     while True:
         try:
@@ -139,7 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("--media-workers", type=int, help="параллельных загрузок медиа (standalone; по умолчанию 8)")
     ps.add_argument("--refresh-days", type=int,
                     help="как далеко назад перепроверять ответы, счётчики и удалённые комментарии (по умолчанию 30 дней)")
-    ps.add_argument("--full", action="store_true", help="проверить всё заново (правки старых постов и комментариев)")
+    ps.add_argument("--full", action="store_true",
+                    help="скачать всё заново: все посты и комментарии с DTF, сравнить с архивом (правки старых постов и "
+                         "комментариев попадут в историю); медиа заново не скачиваются — их проверяет verify")
     ps.add_argument("--only", help="только стадии через запятую: posts,comments,threads,media")
     ps.add_argument("--media", choices=MEDIA_MODES,
                     help="какие медиафайлы скачивать: all — все, posts — только из постов (с аватарками и реакциями, "
@@ -150,6 +153,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="продолжить после остановки защитой архива: пропавшее на DTF отметить, сохранённое оставить")
     ps.add_argument("--standalone", action="store_true",
                     help="работать в этом процессе, даже если LDTF запущен (иначе задание уходит в LDTF)")
+
+    pvf = sub.add_parser("verify", help="проверить целостность архива: все файлы и медиа по контрольным суммам, "
+                                        "повреждённое восстановить (из локальных копий или с DTF)")
+    common(pvf)
+    pvf.add_argument("--offline", action="store_true",
+                     help="без сети: проверить и восстановить из локальных копий, остальное — при следующей синхронизации")
+    pvf.add_argument("--standalone", action="store_true",
+                     help="работать в этом процессе, даже если LDTF запущен (иначе задание уходит в LDTF)")
 
     pr = sub.add_parser("render", help="пересобрать view.sqlite, md/ и data/ из локальных данных (без сети)")
     common(pr)
@@ -197,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "sync" and args.scope:
         set_scope(arch, args.scope, args.drop_comments)
+
+    if args.cmd == "verify":
+        return verify(arch, args)
 
     if args.cmd == "sync" and not args.standalone:
         from .web.server import find_running
@@ -248,6 +262,47 @@ def main(argv: list[str] | None = None) -> int:
         arch.close()
         return 0
     return 1
+
+
+def verify(arch: Archive, args: argparse.Namespace) -> int:
+    """`verify`: «Проверить целостность» from the console (in the running LDTF unless --standalone or --offline)."""
+    from .integrity import OUTCOMES, Check, DbDamaged
+    from .sync import Exit, Syncer, acquire_lock, release_lock
+    if not arch.exists():
+        raise SystemExit("Архив ещё не синхронизирован — проверять нечего.")
+    if not (args.standalone or args.offline):
+        from .web.server import find_running
+        running = find_running(args.root)
+        if running and running.get("token"):
+            code = delegate(running, arch, args, kind="verify")
+            arch.close()
+            return code
+    if args.offline:
+        other = acquire_lock(arch.lock_path)
+        if other:
+            raise SystemExit(f"С архивом работает другой процесс (PID {other}) — повторите позже.")
+        try:
+            try:
+                chk = Check(arch, mode="full", media=True).run()
+            except DbDamaged as e:
+                print(f"База архива повреждена: {e}. Восстановление — обычной проверкой (без --offline).")
+                return Exit.INTEGRITY
+            for f in chk.found:
+                print(f"  {f['kind']} {f.get('id')}: {OUTCOMES.get(f['outcome'], f['outcome'])}")
+            sm = chk.summary()
+            print(f"Проверено: файлов {chk.counts['files']}, медиа {chk.counts['media_hashed']}; найдено {sm['problems']}"
+                  + (f", ждут загрузки с DTF {sm['pending']}" if sm["pending"] else ""))
+        finally:
+            release_lock(arch.lock_path)
+            arch.close()
+        return 0
+    syncer = Syncer.from_settings(arch, args.user, arch.settings(), verify="full", check_only=True)
+    code = syncer.run()
+    if code == Exit.OK and (syncer.network_ran or (syncer.check and syncer.check.found)):
+        from .render import render
+        render(arch)
+    arch.close()
+    return code
 
 
 if __name__ == "__main__":

@@ -46,6 +46,9 @@ BUILD_STEPS = {"load-posts": "чтение постов", "load-comments": "чт
                "build-posts": "страницы постов", "build-comments": "страницы комментариев", "build-search": "поиск",
                "build-months": "лента по месяцам", "export-posts": "файлы для чтения без LDTF: посты",
                "export-months": "файлы для чтения без LDTF: комментарии", "done": "готово"}
+INTEGRITY_STEPS = {"db": "базы", "baseline": "первая опись файлов", "files": "файлы архива", "comments": "свои комментарии",
+                   "history": "сохранённые версии", "media": "медиафайлы", "media-hash": "медиафайлы целиком",
+                   "restore": "восстановление базы из копии"}
 BUILD_ORDER = list(BUILD_STEPS)   # the build reports its steps in this order: its percent spans all of them
 PRIORITY_REASONS = ("manual", "create", "cli")   # what the user asked for goes before scheduled syncs
 
@@ -120,6 +123,11 @@ class Job:
                     rate = st.get("rate") or 0
                     if st.get("status") == "running" and rate > 0 and total > done:
                         s["eta"] = int((total - done) / rate)
+                if key == "integrity" and st.get("phase"):
+                    s["phaseTitle"] = INTEGRITY_STEPS.get(st["phase"], st["phase"])
+                    s.pop("done", None)   # counts of one step (bytes of media) would mislead; the percent stays
+                    s.pop("total", None)
+                    s.pop("eta", None)
                 if key == "build" and st.get("phase"):
                     s["phaseTitle"] = BUILD_STEPS.get(st["phase"], st["phase"])
                     if st["phase"] in BUILD_ORDER and s.get("status") == "running":   # one percent for all the steps

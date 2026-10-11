@@ -15,9 +15,10 @@ from typing import TYPE_CHECKING, Any, Callable
 from .. import __version__, config
 from .. import winintegration as win
 from ..api import is_not_found
-from ..guard import ACCEPTABLE, account_problem, site_summary, state_title
+from ..guard import ACCEPTABLE, account_problem, site_summary
 from ..guard import hint as guard_hint, title as guard_title
 from ..http import FatalNetworkError
+from ..integrity import META_CHECK, META_FULL, META_LOG, OUTCOMES, PROBLEMS
 from ..media import MEDIA_MODE_TITLES, avatar_key, effective_media
 from ..normalize import EXT_LINK
 from ..reactions import Reactions, load_config, save_negative
@@ -29,7 +30,7 @@ from ..sync import status as status_text
 from ..util import COMMENTS, FILES, POSTS, count_label, human_bytes, log, num, plural, short, ts_date, ts_human
 from .icons import icon
 from .blocks_page import blocks_card
-from .jobs import ACTIVE, CANCELLED, ERROR, JOB_STATES, QUEUED, RUNNING_TITLES, STATE_ICONS
+from .jobs import ACTIVE, CANCELLED, ERROR, JOB_STATES, QUEUED, RUNNING_TITLES, STATE_ICONS, SYNC_KINDS
 from .ui import (Links, app_tabs, archive_link, avatar, badge, banner, btn, empty_state, fold, hidden_input, icon_btn,
                  manage_tabs, menu, menu_item, page_head, sec_head, snackbar, stat)
 
@@ -39,7 +40,8 @@ if TYPE_CHECKING:
 E = html.escape
 FLASH = "<!--flash-->"   # the outcome of the form that led to the page (server.Handler.html puts it here)
 ISSUES = "https://github.com/Gwynerva/ldtf/issues"
-JOB_BADGES = {"sync": "синхронизация", "render": "пересборка", "purge": "удаление комментариев"}
+JOB_BADGES = {"sync": "синхронизация", "render": "пересборка", "purge": "удаление комментариев",
+              "verify": "проверка целостности"}
 
 
 # ---------------------------------------------------------------------- archives
@@ -192,9 +194,62 @@ def own_losses(site: dict | None) -> dict:
     return {k: v for k, v in (site or {}).items() if k != "context"}
 
 
-FULL_CHECK = ("Проверить всё заново? LDTF снова скачает все {what} и перепроверит медиафайлы — для активного "
-              "пользователя это может занять несколько часов. Обычная синхронизация и так подхватывает новое и "
-              "изменения последних недель.")
+FULL_SYNC = ("Скачать всё заново? LDTF снова скачает с DTF все {what} и сравнит с архивом — правки попадут в историю "
+             "версий. Для активного пользователя это может занять несколько часов. Обычная синхронизация и так "
+             "подхватывает новое и изменения последних недель. Медиафайлы заново не скачиваются: их сохранность "
+             "проверяет «Проверить целостность».")
+VERIFY = ("Проверить целостность архива? LDTF прочитает все его файлы, включая каждый медиафайл ({size}), и сверит их с "
+          "контрольными суммами — это может занять несколько минут. Повреждённое восстановит из локальных копий, а чего "
+          "в них нет — скачает с DTF; если на DTF уже другая версия, это будет отмечено в истории.")
+FINDING_KINDS = {"post": "Пост", "comment": "Комментарий", "tree": "Комментарии под постом", "thread": "Ветка обсуждения",
+                 "file": "Файл", "media": "Медиафайл", "version": "Версия в истории", "database": "База"}
+
+
+def integrity_card(L: Links, chk: dict | None, full: dict | None, found: list[dict], pending: int,
+                   media_bytes: int, running: bool, form: Callable[..., str]) -> str:
+    """The sync tab's «Целостность архива»: the last check, what it found, the full check."""
+    if chk is None:
+        head, ic, cls = "Архив ещё не проверялся", "verified_user", ""
+        sub = "Проверка идёт перед каждой синхронизацией"
+    else:
+        lost = chk.get("lost") or 0
+        if pending:
+            head, ic, cls = f"Ждут загрузки с DTF: {num(pending)}", "gpp_maybe", "warn"
+        elif chk.get("problems"):
+            head, ic, cls = ((f"Найдено и восстановлено: {num(chk.get('restored') or 0)}"
+                              + (f", утрачено: {num(lost)}" if lost else "")), "gpp_maybe" if lost else "verified_user",
+                             "warn" if lost else "done")
+        else:
+            head, ic, cls = "Повреждений нет", "verified_user", "done"
+        how = "полная проверка" if chk.get("mode") == "full" else "при синхронизации"
+        sub = f"Проверено {ts_human(chk['ts'])} ({how})"
+        sub += (f" · все медиафайлы — {ts_date(full['ts'])}" if full else " · все медиафайлы целиком ещё не проверялись")
+    button = form(L.action("verify"), btn("Проверить целостность", "tonal", "fact_check"),
+                  confirm=VERIFY.format(size=human_bytes(media_bytes) if media_bytes else "медиа пока нет"),
+                  hidden=running)
+    items = []
+    for f in found[:60]:
+        kind, ident = f.get("kind"), f.get("id")
+        href = (L.post(ident) if kind == "post" else L.go(ident) if kind == "comment"
+                else L.post(ident) + "#comments" if kind == "tree" else None)
+        if f.get("outcome") in ("replaced", "lost") and kind in ("post", "comment"):
+            href = L.post_history(ident) if kind == "post" else L.comment_history(ident)
+        what = f.get("title") or (str(ident) if kind not in ("post", "comment") else f"#{ident}")
+        name = f'<a href="{E(href)}">{E(what)}</a>' if href else f"<span>{E(what)}</span>"
+        items.append(f'<li>{name}<span class="li-s">{E(FINDING_KINDS.get(kind, kind or ""))} '
+                     f'{E(PROBLEMS.get(f.get("problem"), f.get("problem") or ""))} · '
+                     f'{E(OUTCOMES.get(f.get("outcome"), f.get("outcome") or ""))} · {E(ts_human(f.get("at") or 0))}</span></li>')
+    more = fold(f"Что нашлось ({num(len(found))})", f'<ul class="guard-list">{"".join(items)}</ul>', "integ-list") \
+        if items else ""
+    return (sec_head("Целостность архива") +
+            f'<section class="card integ"><div class="integ-h"><span class="jp-ic {cls}">{icon(ic, fill=cls == "done")}'
+            f'</span><div class="jp-tt"><b>{E(head)}</b><span class="jp-time">{E(sub)}</span></div>{button}</div>'
+            f'<p class="integ-about">Перед каждой синхронизацией LDTF сверяет файлы архива с их контрольными суммами и '
+            f'чинит повреждённое — из локальной копии или заново с DTF. Если на DTF уже другая версия, в истории '
+            f'поста или комментария это отмечено. Полная проверка читает ещё и каждый медиафайл целиком.</p>'
+            f'{more}</section>')
+
+
 
 
 def sync_page(app: "App", nick: str) -> str:
@@ -204,7 +259,8 @@ def sync_page(app: "App", nick: str) -> str:
     L = Links(nick)
     s = arch.settings()
     kept = comments_kept(s)
-    st, last, media, guard, site, site_items, skipped = "", None, (0, 0), None, "", [], 0
+    st, last, media, guard, site, skipped = "", None, (0, 0), None, "", 0
+    chk, full, found, pending = None, None, [], 0
     if arch.exists():
         try:
             st = status_text(arch)
@@ -212,9 +268,10 @@ def sync_page(app: "App", nick: str) -> str:
             last = ls.get("finished")
             skipped = ((ls.get("stats") or {}).get("media") or {}).get("skipped_by_mode") or 0
             site = site_summary(own_losses((ls.get("stats") or {}).get("site")))
-            site_items = (ls.get("stats") or {}).get("site_items") or []
             guard = arch.get_meta(META_GUARD)
             media = arch.media_usage()
+            chk, full, found = arch.get_meta(META_CHECK), arch.get_meta(META_FULL), arch.get_meta(META_LOG) or []
+            pending = arch.db.execute("SELECT COUNT(*) FROM repairs").fetchone()[0]
         finally:
             arch.close()
     running = bool(job and job.state in ACTIVE)
@@ -222,8 +279,9 @@ def sync_page(app: "App", nick: str) -> str:
         (state, ic), cls = JOB_STATES[job.state], job.state
         if job.state != QUEUED:
             state = RUNNING_TITLES.get(job.kind, state)
-    elif job and job.kind == "sync" and job.state in (ERROR, CANCELLED) and not guard:   # the latest try (details below)
-        state, ic, cls = ("Синхронизация не удалась" if job.state == ERROR else "Синхронизация остановлена — прогресс сохранён",
+    elif job and job.kind in SYNC_KINDS and job.state in (ERROR, CANCELLED) and not guard:   # the latest try (below)
+        what = "Проверка целостности" if job.kind == "verify" else "Синхронизация"
+        state, ic, cls = (f"{what} не удалась" if job.state == ERROR else f"{what} остановлена — прогресс сохранён",
                           "error" if job.state == ERROR else "cancel", job.state)
     elif guard and last:   # the guard card above says what happened; here: what the archive has
         state, ic, cls = f"Последняя успешная синхронизация {ts_human(last)}", "history", ""
@@ -241,19 +299,15 @@ def sync_page(app: "App", nick: str) -> str:
         when = "Автосинхронизация приостановлена для всех архивов (настройки приложения)"
     else:
         when = ""
+    # what disappeared from DTF last time: a quiet line, the content itself is on «Удалённое на DTF»
     changes = ""
     if site and not guard and not running:
-        lst = "".join(
-            f'<li><a href="{E(L.post(x["id"]) if x["kind"] == "post" else L.go(x["id"]))}">{E(x.get("title") or "(без текста)")}</a>'
-            f'<span class="li-s">{E(state_title(x.get("state")))}{" · " + E(x["post"]) if x.get("post") else ""}</span></li>'
-            for x in site_items)
-        more = fold("Что пропало", f'<ul class="guard-list">{lst}</ul>', "site-list") if lst else ""
-        changes = banner("warn", f"<b>Изменения на DTF</b> при последней синхронизации: пропало {E(site)}. "
-                                 f"В архиве сохранены прежние версии с пометкой, что на DTF их больше нет.{more}", "shield")
+        changes = (f'<p class="jp-site">{icon("history")}<span>При последней синхронизации на DTF пропало: {E(site)} — '
+                   f'в архиве всё сохранено. <a href="{E(L.removed())}">Посмотреть</a></span></p>')
     what = "посты и комментарии" if kept else "посты"
     more = menu("more_vert", "Ещё",
-                app.shell.form(L.action("sync/start"), hidden_input("full", 1) + menu_item("Проверить всё заново", "fact_check"),
-                               confirm=FULL_CHECK.format(what=what))
+                app.shell.form(L.action("sync/start"), hidden_input("full", 1) + menu_item("Скачать всё заново", "download"),
+                               confirm=FULL_SYNC.format(what=what))
                 + app.shell.form(L.action("render"), menu_item(
                     "Пересобрать страницы", "restart_alt",
                     title="Собрать страницы архива заново из уже скачанного, без интернета. Обычно не нужно: LDTF "
@@ -262,7 +316,7 @@ def sync_page(app: "App", nick: str) -> str:
                + ("" if guard else app.shell.form(L.action("sync/start"), btn("Синхронизировать", ic="sync"))) + more + "</div>")
     stop = app.shell.form(L.action("sync/stop"), hidden_input("job", job.id if job else 0)
                           + btn("Остановить", "danger tonal", "stop_circle"), cls="job-stop",
-                          hidden=not running or job.kind != "sync")
+                          hidden=not running or job.kind not in SYNC_KINDS)
     acc = app.account(nick) or {}
     stats = ""
     if acc.get("built") or media[0]:
@@ -283,14 +337,16 @@ def sync_page(app: "App", nick: str) -> str:
                       f'<a href="{E(L.settings())}">настройках архива</a>. Их показывает DTF, пока они там есть.</span></p>')
     icons = '<template class="icons">' + "".join(f'<i data-n="{n}">{icon(n, fill=n in ("check_circle", "error", "cancel"))}</i>'
                                                  for n in STATE_ICONS) + "</template>"
-    body = (page_head("Управление архивом") + manage_tabs(L, "sync") + FLASH + (guard_card(app, nick, guard) if guard else changes) +
+    integ = integrity_card(L, chk, full, found, pending, media[1], running, app.shell.form) if arch.exists() else ""
+    body = (page_head("Управление архивом") + manage_tabs(L, "sync") + FLASH + (guard_card(app, nick, guard) if guard else "") +
             f'<div id="job-panel" class="card" data-job="{job.id if job else ""}" data-running="{int(running)}">'
             f'<div class="jp-head"><span class="jp-ic {cls}">{icon(ic, fill=cls == "done")}</span>'
             f'<div class="jp-tt"><b class="jp-state">{E(state)}</b><span class="jp-time">{E(when)}</span></div>'
-            f'{stop}{actions}</div>'
+            f'{stop}{actions}</div>{changes}'
             f'<div class="jp-net" hidden></div><div class="jp-stages"></div>'
             + fold("Журнал", '<pre class="jp-log"></pre>', "fold jp-logw", "" if job else " hidden") + "</div>"
-            + stats + fold("Технические подробности", f'<pre class="status">{E(st) or "Архив ещё пуст."}</pre>') + icons)
+            + stats + integ + fold("Технические подробности", f'<pre class="status">{E(st) or "Архив ещё пуст."}</pre>')
+            + icons)
     return app.page("Синхронизация", body, nick, active="sync")
 
 
@@ -755,6 +811,13 @@ def post_sync_stop(h: "Handler", app: "App", arch: Archive, f: dict, val: Callab
     return h.redirect(Links(arch.nick).sync())
 
 
+def post_verify(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[..., str]) -> None:
+    """«Проверить целостность»: everything checked, repaired; downloads (a sync) only if something has to come again."""
+    app.jobs.submit(arch.nick, "verify", reason="manual")
+    app.invalidate(arch.nick)
+    return h.redirect(Links(arch.nick).sync())
+
+
 def post_render(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[..., str]) -> None:
     app.jobs.submit(arch.nick, "render", reason="manual")
     return h.redirect(Links(arch.nick).sync())
@@ -840,7 +903,7 @@ def post_delete(h: "Handler", app: "App", arch: Archive, f: dict, val: Callable[
 
 
 ARCHIVE_ACTIONS = {"sync/start": post_sync_start, "sync/stop": post_sync_stop, "render": post_render, "guard": post_guard,
-                   "settings": post_settings, "delete": post_delete}
+                   "settings": post_settings, "delete": post_delete, "verify": post_verify}
 ARCHIVE_ACTION_RE = re.compile(r"/u/([^/]+)/(" + "|".join(map(re.escape, ARCHIVE_ACTIONS)) + ")")
 
 

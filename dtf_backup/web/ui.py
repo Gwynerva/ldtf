@@ -57,6 +57,7 @@ class Links:
     def search(self) -> str: return self.base + "/search"
     def donations(self) -> str: return self.base + "/donations"
     def changes(self) -> str: return self.base + "/changes"
+    def removed(self) -> str: return self.base + "/removed"
     def post_history(self, pid: int) -> str: return f"{self.base}/p/{int(pid)}/history"
     def comment_history(self, cid: int) -> str: return f"{self.base}/c/{int(cid)}/history"
 
@@ -64,7 +65,8 @@ class Links:
         return f"{self.base}/p/{int(pid)}/history/{int(hid)}" + ("?full=1" if full else "")
     def sync(self) -> str: return self.base + "/sync"
     def settings(self) -> str: return self.base + "/settings"
-    def action(self, name: str) -> str: return f"{self.base}/{name}"   # POST: sync/start, sync/stop, render, guard, delete
+    def action(self, name: str) -> str: return f"{self.base}/{name}"   # POST: sync/start, sync/stop, render, guard, delete,
+                                                                         # verify
 
     @staticmethod
     def media(path: str) -> str: return "/" + path.lstrip("/")

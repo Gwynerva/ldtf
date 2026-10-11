@@ -29,7 +29,8 @@ if TYPE_CHECKING:
 
 E = html.escape
 TEXT_TYPES = {"text", "header", "quote", "incut", "list", "code"}
-EVENTS = {"edit": ("edit_note", "Правки"), "removed": ("delete", "Удаления"), "restored": ("settings_backup_restore", "Возвращения")}
+EVENTS = {"edit": ("edit_note", "Правки"), "removed": ("delete", "Удаления"), "restored": ("settings_backup_restore", "Возвращения"),
+          "damaged": ("gpp_maybe", "Повреждения")}   # damaged: the archive's copy was damaged (integrity.py)
 PER_PAGE = 50
 
 
@@ -46,6 +47,14 @@ def _rows(db: sqlite3.Connection, kind: str, item: int) -> list[sqlite3.Row]:
 
 
 def _event_li(r: sqlite3.Row, what: str) -> str:
+    if r["event"] == "damaged":
+        ver = f' от {ts_human(r["version_date"])}' if r["version_date"] else ""
+        sub = (f"версия{ver}, которая была в архиве, утрачена; с DTF загружена текущая — она отличается от неё"
+               if r["state"] == "replaced" else
+               f"версия{ver} не восстановлена: на DTF её уже нет")
+        return (f'<li class="tl-i tl-dmg"><span class="tl-dot">{icon("gpp_maybe")}</span><div class="tl-b">'
+                f'<b>Копия в архиве была повреждена</b>'
+                f'<span class="tl-s">LDTF заметил {ts_human(r["at"])}: {E(sub)}</span></div></li>')
     if r["event"] == "removed":
         return (f'<li class="tl-i tl-rm"><span class="tl-dot">{icon("delete")}</span><div class="tl-b">'
                 f'<b>{E(what)} {E(state_title(r["state"]) if r["state"] else "пропал с DTF")}</b>'
@@ -233,6 +242,7 @@ def page_changes(v: "ArchiveView", event: str, kind: str, page: int) -> tuple[st
         where.append("h.kind='post'")
     db = v.db()
     total = db.execute(f"SELECT COUNT(*) FROM history h WHERE {' AND '.join(where)}", args).fetchone()[0]
+    damaged = db.execute("SELECT 1 FROM history WHERE event='damaged' LIMIT 1").fetchone() is not None
     npages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
     page = max(1, min(page, npages))
     rows = db.execute(f"SELECT h.id, h.kind, h.item_id, h.entry_id, h.at, h.event, h.state FROM history h "
@@ -260,7 +270,8 @@ def page_changes(v: "ArchiveView", event: str, kind: str, page: int) -> tuple[st
     def chip(label: str, on: bool, href: str) -> str:
         return f'<a class="chip{" on" if on else ""}" href="{E(href)}">{icon("check", cls="ck") if on else ""}{E(label)}</a>'
     chips = ('<div class="chips scroll filters">' + chip("Все", not event, link(e=None))
-             + "".join(chip(t, event == k, link(e=k)) for k, (_, t) in EVENTS.items())
+             + "".join(chip(t, event == k, link(e=k)) for k, (_, t) in EVENTS.items()
+                       if k != "damaged" or damaged or event == k)
              + ('<span class="chips-div"></span>' + chip("Посты", kind == "post", link(k=None if kind == "post" else "post"))
                 + chip("Комментарии", kind == "comment", link(k=None if kind == "comment" else "comment"))
                 if v.comments_on else "") + "</div>")
@@ -268,7 +279,9 @@ def page_changes(v: "ArchiveView", event: str, kind: str, page: int) -> tuple[st
     for r in rows:
         ic, _ = EVENTS.get(r["event"], ("history", ""))
         ev = {"edit": "изменён", "removed": state_title(r["state"]) if r["state"] else "пропал с DTF",
-              "restored": "снова есть на DTF"}.get(r["event"], r["event"])
+              "restored": "снова есть на DTF",
+              "damaged": "повреждён в архиве" + (", на DTF другая версия" if r["state"] == "replaced" else
+                                                 ", не восстановлен")}.get(r["event"], r["event"])
         if r["kind"] == "post":
             href = L.post_history(r["item_id"])
             t = titles.get(r["item_id"]) or "Пост"

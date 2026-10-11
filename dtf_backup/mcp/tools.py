@@ -31,7 +31,8 @@ from ..viewdb import open_view, view_meta
 
 MAX_CHARS = 30_000
 TAG_RE = re.compile(r"<[^>]+>")
-EVENTS = {"edit": "изменён", "removed": "удалён", "restored": "снова есть на DTF"}
+EVENTS = {"edit": "изменён", "removed": "удалён", "restored": "снова есть на DTF",
+          "damaged": "копия в архиве была повреждена"}   # integrity.py: state replaced | lost
 
 
 class ToolError(Exception):
@@ -661,7 +662,7 @@ class Tools:
         if kind not in (None, "", "post", "comment"):
             raise ToolError("kind: post | comment")
         if event not in (None, "", *EVENTS):
-            raise ToolError("event: edit | removed | restored")
+            raise ToolError("event: edit | removed | restored | damaged")
         v = self.view(archive)
         if id is None:
             return self._changes(v, kind, event, date_from, date_to, limit, offset)
@@ -708,6 +709,11 @@ class Tools:
             elif r["event"] == "removed":
                 out.append(f"\n- {ts_human(r['at'])}: {state_title(r['state']) if r['state'] else 'пропал с DTF'} "
                            f"(в архиве осталась прежняя версия)")
+            elif r["event"] == "damaged":
+                ver = f" от {ts_human(r['version_date'])}" if r["version_date"] else ""
+                out.append(f"\n- {ts_human(r['at'])}: копия в архиве была повреждена — версия{ver} утрачена"
+                           + ("; с DTF загружена текущая, она отличается от утраченной" if r["state"] == "replaced"
+                              else "; на DTF её уже нет"))
             else:
                 out.append(f"\n- {ts_human(r['at'])}: снова есть на DTF")
         if kind == "post":
@@ -756,6 +762,8 @@ class Tools:
                 what += f" (версия {hid} от {ts_human(vdate)})"
             elif ev == "removed" and state:
                 what += f": {state_title(state)}"
+            elif ev == "damaged":
+                what += ", на DTF уже другая версия" if state == "replaced" else ", не восстановлена"
             if k == "post":
                 lines.append(f"- {ts_human(at)} · пост {v.post_ref(item, ents.get(item), owners)} · {what}")
             else:
@@ -766,7 +774,9 @@ class Tools:
                              + (f" · «{text[:120]}{'…' if len(text) > 120 else ''}»" if text else ""))
         shown = _fit(lines, 400)
         out = [f"Изменения на DTF: {total} (правок {counts.get('edit', 0)}, удалений {counts.get('removed', 0)}, "
-               f"возвращений {counts.get('restored', 0)})" + (f", LDTF следит за ними с {ts_human(since)}" if since else "")
+               f"возвращений {counts.get('restored', 0)}"
+               + (f", повреждений копии в архиве {counts['damaged']}" if counts.get("damaged") else "") + ")"
+               + (f", LDTF следит за ними с {ts_human(since)}" if since else "")
                + f"; показаны {offset + 1}–{offset + shown}, сначала новые"] + lines[:shown]
         if offset + shown < total:
             out.append(f"\nЕщё: offset={offset + shown}")
@@ -903,7 +913,8 @@ TOOLS: list[dict] = [
                              "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
                              "offset": {"type": "integer", "minimum": 0, "default": 0}})},
     {"name": "get_history", "title": "История правок",
-     "description": "Edits, removals and returns seen by LDTF. Without `id`: the feed of all changes in the archive "
+     "description": "Edits, removals and returns seen by LDTF (and `damaged`: the archive's own copy of a version was "
+                    "damaged and could not be restored exactly). Without `id`: the feed of all changes in the archive "
                     "(filters kind, event, dates), newest first. With `kind` + `id`: one post or comment, with what "
                     "changed between versions ([-removed-] {+added+}).",
      "inputSchema": _schema({"kind": {"type": "string", "enum": ["post", "comment"]}, "id": {"type": "integer"},

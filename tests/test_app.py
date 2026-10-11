@@ -482,6 +482,42 @@ class AppTest(unittest.TestCase):
             save_settings(self.arch.settings_path, settings)
             self.app.invalidate()
 
+    def test_integrity_ui(self) -> None:
+        from dtf_backup import integrity
+        _, body, _ = self.get("/u/tester/sync")
+        self.assertIn("Целостность архива", body)
+        self.assertIn("Проверить целостность", body)
+        self.assertIn("Скачать всё заново", body)
+        self.assertNotIn("Проверить всё заново", body)
+        self.assertNotIn("перепроверит медиафайлы", body)
+        j = self.app.jobs.submit("tester", "verify", reason="manual")
+        for _ in range(240):
+            if j.state not in ("queued", "running"):
+                break
+            time.sleep(0.25)
+        self.assertEqual(j.state, "done", j.snapshot())
+        self.assertEqual([s["key"] for s in j.snapshot()["stages"]][0], "integrity")
+        chk = self.arch.get_meta(integrity.META_CHECK)
+        self.assertEqual(chk["mode"], "full")
+        self.arch.set_meta(integrity.META_LOG, [integrity.finding("post", OWN_POST, "damaged", "replaced", "Пост X")])
+        last = self.arch.get_meta("last_sync")
+        now = int(time.time())
+        self.arch.set_meta("last_sync", dict(last or {"ts": now, "finished": now}, stats={"site": {"comments_gone": 2}}))
+        self.arch.commit()
+        self.app.invalidate()
+        try:
+            _, body, _ = self.get("/u/tester/sync")
+            self.assertIn("Что нашлось (1)", body)
+            self.assertIn(f"/u/tester/p/{OWN_POST}/history", body)       # «на DTF уже другая версия» → its history
+            self.assertIn("jp-site", body)                                 # a quiet line instead of the yellow banner
+            self.assertIn("/u/tester/removed", body)
+            self.assertNotIn("banner warn", body)
+        finally:
+            self.arch.set_meta(integrity.META_LOG, None)
+            self.arch.set_meta("last_sync", last)
+            self.arch.commit()
+            self.app.invalidate()
+
     def test_broken_view_does_not_break_the_app(self) -> None:
         bad = self.library / "broken"
         (bad / ".state").mkdir(parents=True)

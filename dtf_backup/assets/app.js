@@ -446,6 +446,7 @@
         if (s.bytes) p.push("скачано " + fmtB(s.bytes));
         if (s.shared) p.push("уже в хранилище " + fmtN(s.shared));
       }
+      if (s.key === "integrity" && s.problems) p.push("найдено повреждений " + s.problems);
       if (s.errors) p.push("ошибок " + s.errors);
       if (s.rate && s.key !== "build") p.push(s.rate.toFixed(1) + "/с");
       if (s.eta) p.push("осталось ≈ " + fmtT(s.eta));
@@ -460,7 +461,7 @@
         icEl.className = "jp-ic " + j.state;
         icEl.innerHTML = ic(j.icon);
         var t0 = j.started || j.created, t1 = j.finished || Date.now() / 1000;
-        timeEl.textContent = (j.params && j.params.full ? "проверка всего заново · " : "") + (t0 ? "идёт " + fmtT(t1 - t0) : "");
+        timeEl.textContent = (j.params && j.params.full ? "скачивание всего заново · " : "") + (t0 ? "идёт " + fmtT(t1 - t0) : "");
       }
       var net = live && j.net, wait = net && (net.fused ? "DTF ограничил запросы: все синхронизации на паузе ещё " +
         fmtT(net.fused) + ". Прогресс сохраняется." : net.backoff ? "DTF просит подождать: пауза " + fmtT(net.backoff) +

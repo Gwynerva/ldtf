@@ -14,12 +14,26 @@ from typing import Any
 
 from . import DEFAULT_PORT, __version__
 from .guard import site_summary
+from .integrity import META_CHECK
 from .scheduler import human_when
 from .state import META_LAST_SYNC, META_SYNC_ATTEMPT, read_meta
 from .util import log
 from .web.jobs import BLOCKED, DONE, ERROR, PRIORITY_REASONS, RUNNING, RUNNING_TITLES
 from .web.server import Runtime, find_running, port_problem
 from .web.ui import Links
+
+
+def verify_notice(job: Any, chk: dict | None) -> tuple[str, str] | None:
+    """(title, text) when «Проверить целостность» ends (the user asked for it: always told)."""
+    if job.state == DONE and chk:
+        if not chk.get("problems"):
+            return f"Архив @{job.nick} в порядке", "Проверка целостности не нашла повреждений."
+        return (f"Проверка архива @{job.nick} завершена",
+                f"Найдено повреждений: {chk['problems']}, восстановлено: {chk.get('restored', 0)}"
+                + (f", утрачено: {chk['lost']}" if chk.get("lost") else "") + ". Подробности — на вкладке «Синхронизация».")
+    if job.state == ERROR:
+        return f"Проверка архива @{job.nick} не удалась", (job.error or "подробности в журнале")[:200]
+    return None
 
 
 def notice(job: Any, attempt: dict | None, site: dict | None) -> tuple[str, str] | None:
@@ -199,9 +213,12 @@ class TrayUI:
     def job_finished(self, job: Any) -> None:
         self._next = (0.0, None)
         self.tray.refresh()
-        if job.kind != "sync" or not self.app.settings().get("notify", True) or self.stopping:
+        if job.kind not in ("sync", "verify") or not self.app.settings().get("notify", True) or self.stopping:
             return
-        meta = read_meta(self.app.library / job.nick, (META_LAST_SYNC, META_SYNC_ATTEMPT)) or {}
-        n = notice(job, meta.get(META_SYNC_ATTEMPT), ((meta.get(META_LAST_SYNC) or {}).get("stats") or {}).get("site"))
+        meta = read_meta(self.app.library / job.nick, (META_LAST_SYNC, META_SYNC_ATTEMPT, META_CHECK)) or {}
+        if job.kind == "verify":
+            n = verify_notice(job, meta.get(META_CHECK))
+        else:
+            n = notice(job, meta.get(META_SYNC_ATTEMPT), ((meta.get(META_LAST_SYNC) or {}).get("stats") or {}).get("site"))
         if n:
             self.tray.notify(n[0], n[1], lambda: self.open_ui(Links(job.nick).sync().lstrip("/")))

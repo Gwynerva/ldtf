@@ -621,6 +621,7 @@ a.c-site:hover { text-decoration: underline; }
 .tl-cur .tl-dot { background: var(--primary-container); color: var(--on-primary-container); }
 .tl-rm .tl-dot { background: var(--error-container); color: var(--on-error-container); }
 .tl-back .tl-dot { background: color-mix(in srgb, var(--pos) 18%, var(--card)); color: var(--pos); }
+.tl-dmg .tl-dot { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .tl-b { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; padding-top: 6px; }
 .tl-b > b { font-weight: 600; }
 .tl-s { font-size: 14px; color: var(--on-surface-variant); overflow-wrap: anywhere; }
@@ -665,6 +666,7 @@ del { background: color-mix(in srgb, var(--neg) 18%, transparent); color: inheri
 .ch-ic .i { width: 20px; height: 20px; }
 .ch-removed .ch-ic { background: var(--error-container); color: var(--on-error-container); }
 .ch-restored .ch-ic { background: color-mix(in srgb, var(--pos) 18%, var(--card)); color: var(--pos); }
+.ch-damaged .ch-ic { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .ch-li .li-link { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ch-li .li-t { font-size: 15px; font-weight: 500; }
 
@@ -965,6 +967,18 @@ details.fold > summary:hover { background: var(--hover); }
 .no-comments { display: flex; align-items: center; gap: 8px; margin: 16px 4px; }
 .no-comments .i { flex: none; width: 18px; height: 18px; }
 .jp-net { margin-top: 12px; }
+/* what disappeared from DTF last time: one quiet line (the content: «Удалённое на DTF») */
+.jp-site { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; font-size: 14px;
+  color: var(--on-surface-variant); }
+.jp-site .i { flex: none; width: 18px; height: 18px; margin-top: 2px; }
+/* integrity of the archive (sync tab) */
+.integ { padding: 16px 20px; }
+.integ-h { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 16px; }
+.integ-h b { font-size: 16px; font-weight: 600; }
+.jp-ic.warn { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.integ-about { margin: 12px 0 0; font-size: 14px; color: var(--on-surface-variant); }
+.integ-list .guard-list { margin: 8px 0 0; }
+.integ-list .li-s { font-size: 13px; }
 .jp-ic.cancelled { background: var(--sc-high); color: var(--on-surface-variant); }
 /* archive guard (sync stopped before DTF's placeholders could overwrite the archive) */
 .guard-banner { align-items: center; }
@@ -1100,7 +1114,7 @@ a.badge { text-decoration: none; }
   .lc-img { flex-basis: 80px; }
   .lc-img img { width: 80px; height: 60px; }
   .fgroup { padding: 16px 16px 20px; }
-  #job-panel { padding: 14px 16px; }
+  #job-panel, .integ { padding: 14px 16px; }
   .st .lp, .st-d { margin-left: 0; }
   .li { gap: 12px; padding: 12px; }
   .acc .av, .acc .av0 { --s: 40px; }
