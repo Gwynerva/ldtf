@@ -26,6 +26,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import sqlite3
 import time
 import zlib
@@ -51,6 +52,7 @@ META_FULL = "integrity_full"       # the last check that hashed every media file
 META_BASELINE = "integrity_baseline"
 META_LOG = "integrity_log"         # what checks and repairs found, newest first (the sync tab)
 META_EXPORT_DIRTY = "export_dirty"  # years of raw/my-comments to write again (a sync that stopped before exporting)
+META_DB_BACKUP = "db_backup"       # when .state/backup/state.sqlite was taken
 
 OUTCOMES = {
     "restored": "восстановлено из локальной копии",
@@ -79,7 +81,12 @@ class Damaged(Exception):
 
 
 class DbDamaged(Exception):
-    """PRAGMA quick_check of a database failed."""
+    """PRAGMA quick_check of a database failed (schema: main = the archive's state.sqlite, store = the shared
+    media.sqlite), or one could not be restored."""
+
+    def __init__(self, message: str, schema: str = "main"):
+        super().__init__(message)
+        self.schema = schema
 
 
 _REQ: Any = object()
@@ -246,6 +253,10 @@ class Check:
         try:
             self.step("db")
             quick_check(self.db, "main")
+            quick_check(self.db, "store")
+            # keys this archive uses that the shared catalog lost (a restored media.sqlite): downloaded again
+            self.db.execute("INSERT OR IGNORE INTO store.media_ref(key, status, updated_at) "
+                            "SELECT DISTINCT key, 'pending', ? FROM main.media_use", (now_ts(),))
             if self.arch.get_meta(META_BASELINE) is None:
                 self.baseline()
             self.check_files()
@@ -681,9 +692,12 @@ class Check:
                 b = safe_unpack(r[0]) if r else None
                 if b and (not row["sig"] or content_sig(row["kind"], b) == row["sig"]):
                     good = r[0]
+            src = "страницы"
+            if good is None:
+                good, src = backup_history_body(self.arch, row), "копия базы"
             if good is not None:
                 db.execute("UPDATE history SET body=? WHERE id=?", (good, row["id"]))
-                self.add(finding("version", row["id"], "damaged", "restored", source="страницы"))
+                self.add(finding("version", row["id"], "damaged", "restored", source=src))
                 continue
             # no copy: the version becomes a marker that it was lost
             cur = db.execute("UPDATE OR IGNORE history SET event='damaged', state='lost', body=NULL WHERE id=?",
@@ -780,9 +794,9 @@ def quick_check(db: sqlite3.Connection, schema: str = "main") -> None:
     try:
         res = [r[0] for r in db.execute(f"PRAGMA {schema}.quick_check(5)")]
     except sqlite3.DatabaseError as e:
-        raise DbDamaged(str(e)) from e
+        raise DbDamaged(str(e), schema) from e
     if res != ["ok"]:
-        raise DbDamaged("; ".join(map(str, res))[:300])
+        raise DbDamaged("; ".join(map(str, res))[:300], schema)
 
 
 def quarantine_media(library: Path, db: sqlite3.Connection, sha: str, path: str) -> None:
@@ -903,8 +917,9 @@ def attempt_failed(db: sqlite3.Connection, kind: str, item_id: int) -> None:
     db.execute("UPDATE repairs SET attempts=attempts+1 WHERE kind=? AND item_id=?", (kind, item_id))
 
 
-def finish(arch: Archive, ran: Iterable[str]) -> None:
-    """End of a sync that went fine: repairs that kept failing end as lost, the mirror takes the new files."""
+def finish(arch: Archive, ran: Iterable[str], checked: bool = True) -> None:
+    """End of a sync that went fine: repairs that kept failing end as lost, the mirror takes the new files, the
+    databases are copied (once a day, only after a check: never a copy of something damaged)."""
     db = arch.db
     kinds = set()
     ran = set(ran)
@@ -924,6 +939,11 @@ def finish(arch: Archive, ran: Iterable[str]) -> None:
             log_findings(arch, [finding(r["kind"], r["item_id"], r["reason"] or "damaged", "partial")])
     db.commit()
     refresh_mirror(arch)
+    if checked and db.execute("SELECT 1 FROM repairs LIMIT 1").fetchone() is None:
+        try:
+            backup_dbs(arch)
+        except (OSError, sqlite3.Error) as e:
+            log.warning(f"[целостность] копия базы не сделана: {e}")
 
 
 def refresh_mirror(arch: Archive) -> int:
@@ -1002,3 +1022,222 @@ def render_gate(arch: Archive) -> None:
         Check(arch, mode="quick", media=False).run()
     finally:
         release_lock(arch.lock_path)
+
+
+# ---------------------------------------------------------------------- databases: copies and restoring
+DB_BACKUP_EVERY = 86400
+
+
+def db_backup_path(arch: Archive) -> Path:
+    return arch.state_dir / "backup" / "state.sqlite"
+
+
+def store_backup_path(library: Path) -> Path:
+    return library / ".state" / "backup" / "media.sqlite"
+
+
+def _vacuum_into(db: sqlite3.Connection, schema: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    db.commit()
+    db.execute(f"VACUUM {schema} INTO ?", (str(tmp),))
+    with open(tmp, "rb+") as f:
+        os.fsync(f.fileno())
+    replace_file(tmp, dest)
+
+
+def backup_dbs(arch: Archive, force: bool = False) -> bool:
+    """A consistent copy of state.sqlite (and of the shared media.sqlite) at most once a day: what a database that
+    breaks is restored from (recover_db)."""
+    now = now_ts()
+    did = False
+    if force or now - int(arch.get_meta(META_DB_BACKUP) or 0) >= DB_BACKUP_EVERY:
+        _vacuum_into(arch.db, "main", db_backup_path(arch))
+        arch.set_meta(META_DB_BACKUP, now)
+        arch.commit()
+        did = True
+    sb = store_backup_path(arch.library)
+    try:
+        fresh = now - sb.stat().st_mtime < DB_BACKUP_EVERY
+    except OSError:
+        fresh = False
+    if force or not fresh:
+        from .sync import acquire_lock, release_lock
+        lock = arch.library / ".state" / "store-backup.lock"
+        if not acquire_lock(lock):   # another archive's sync is copying it right now
+            try:
+                _vacuum_into(arch.db, "store", sb)
+                did = True
+            finally:
+                release_lock(lock)
+    if did:
+        log.info("[целостность] копия базы архива обновлена")
+    return did
+
+
+def backup_history_body(arch: Archive, row: Any) -> bytes | None:
+    """The body of a kept version from the database copy, if it is the same version."""
+    b = db_backup_path(arch)
+    if not b.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"{b.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            r = con.execute("SELECT body FROM history WHERE id=?", (row["id"],)).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    obj = safe_unpack(r[0]) if r else None
+    if obj is None or (row["sig"] and content_sig(row["kind"], obj) != row["sig"]):
+        return None
+    return r[0]
+
+
+# rows taken from a damaged database (newer than its copy) only when they still read whole
+def _valid_blob(col: str) -> Callable[[dict], bool]:
+    return lambda r: r.get(col) is None or safe_unpack(r[col]) is not None
+
+
+SALVAGE_MAIN = (("meta", "REPLACE", None), ("posts", "REPLACE", None), ("my_comments", "REPLACE", _valid_blob("raw")),
+                ("slices", "REPLACE", None), ("threads", "REPLACE", None), ("media_use", "IGNORE", None),
+                ("history", "IGNORE", _valid_blob("body")), ("files", "REPLACE", None), ("repairs", "REPLACE", None))
+SALVAGE_STORE = (("media_ref", "REPLACE", None), ("blob", "REPLACE", None))
+
+
+def salvage(src: Path, dst: sqlite3.Connection, tables: Iterable[tuple], schema: str = "main") -> Counter:
+    """Copy what still reads of a damaged database into `dst` (row by row: a broken page ends that table)."""
+    n: Counter = Counter()
+    try:
+        con = sqlite3.connect(f"{src.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return n
+    con.row_factory = sqlite3.Row
+    try:
+        for table, mode, ok in tables:
+            try:
+                cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
+                have = {r[1] for r in dst.execute(f"PRAGMA {schema}.table_info({table})")}
+                cols = [c for c in cols if c in have]
+                if not cols:
+                    continue
+                cur = con.execute(f"SELECT {', '.join(cols)} FROM {table}")
+            except sqlite3.Error:
+                continue
+            sql = (f"INSERT OR {mode} INTO {schema}.{table}({', '.join(cols)}) "
+                   f"VALUES ({', '.join('?' * len(cols))})")
+            while True:
+                try:
+                    row = cur.fetchone()
+                except sqlite3.Error:
+                    break
+                if row is None:
+                    break
+                d = dict(row)
+                if ok and not ok(d):
+                    continue
+                try:
+                    dst.execute(sql, [d[c] for c in cols])
+                    n[table] += 1
+                except sqlite3.Error:
+                    continue
+        dst.commit()
+    finally:
+        con.close()
+    return n
+
+
+def _set_aside_db(path: Path, qdir: Path) -> Path:
+    qdir.mkdir(parents=True, exist_ok=True)
+    for suf in ("", "-wal", "-shm"):
+        f = Path(str(path) + suf)
+        if f.exists():
+            try:
+                replace_file(f, qdir / f.name)
+            except OSError as e:
+                raise DbDamaged(f"файл базы занят другой программой ({e}) — восстановлю при следующей попытке") from e
+    return qdir / path.name
+
+
+def recover_db(arch: Archive) -> dict:
+    """state.sqlite failed quick_check: it goes to quarantine, its daily copy takes its place and whatever still reads
+    of the damaged one (newer rows) is copied over; the check that follows repairs the rest."""
+    from .state import SCHEMA, _add_columns
+    path = arch.db_path
+    backup = db_backup_path(arch)
+    arch.close()
+    qdir = quarantine_dir(arch)
+    damaged = _set_aside_db(path, qdir)
+    tmp = path.with_name(path.name + ".restore")
+    tmp.unlink(missing_ok=True)
+    if backup.exists():
+        import shutil
+        shutil.copyfile(backup, tmp)
+    con = sqlite3.connect(tmp)
+    try:
+        con.executescript(SCHEMA)
+        _add_columns(con)
+        n = salvage(damaged, con, SALVAGE_MAIN)
+        quick_check(con)
+    finally:
+        con.close()
+    replace_file(tmp, path)
+    when = arch.get_meta(META_DB_BACKUP) if backup.exists() else None
+    info = {"backup": bool(backup.exists()), "backup_at": when, "rows": dict(n)}
+    log_findings(arch, [finding("database", "state.sqlite", "damaged", "restored",
+                                "база архива", source="копия базы" if backup.exists() else "уцелевшие строки")])
+    arch.commit()
+    log.warning(f"[целостность] база архива была повреждена: восстановлена из "
+                f"{'копии и ' if backup.exists() else ''}уцелевших строк ({dict(n)}); повреждённая — в {qdir}")
+    return info
+
+
+def recover_store(arch: Archive) -> dict:
+    """The shared media.sqlite failed quick_check: restored like recover_db while no other archive syncs (their
+    locks are held; this archive's own lock is held by the caller)."""
+    from .state import STORE_COLUMNS, STORE_SCHEMA, archive_dirs, store_path
+    from .sync import acquire_lock, release_lock
+    library = arch.library
+    held: list[Path] = []
+    try:
+        for d in archive_dirs(library):
+            lock = Archive(d, library).lock_path
+            if lock == arch.lock_path:
+                continue
+            if acquire_lock(lock):
+                raise DbDamaged("общая база медиа повреждена, а другой архив сейчас синхронизируется — "
+                                "восстановлю при следующей синхронизации", "store")
+            held.append(lock)
+        path = store_path(library)
+        backup = store_backup_path(library)
+        arch.close()
+        qdir = library / ".state" / "quarantine" / time.strftime("%Y%m%d-%H%M%S")
+        damaged = _set_aside_db(path, qdir)
+        tmp = path.with_name(path.name + ".restore")
+        tmp.unlink(missing_ok=True)
+        if backup.exists():
+            import shutil
+            shutil.copyfile(backup, tmp)
+        con = sqlite3.connect(":memory:")
+        try:
+            con.execute("ATTACH DATABASE ? AS store", (str(tmp),))
+            con.executescript(STORE_SCHEMA)
+            for table, added in STORE_COLUMNS.items():
+                cols = {r[1] for r in con.execute(f"PRAGMA store.table_info({table})")}
+                for col, typ in added:
+                    if col not in cols:
+                        con.execute(f"ALTER TABLE store.{table} ADD COLUMN {col} {typ}")
+            n = salvage(damaged, con, SALVAGE_STORE, "store")
+            quick_check(con, "store")
+        finally:
+            con.close()
+        replace_file(tmp, path)
+        log_findings(arch, [finding("database", "media.sqlite", "damaged", "restored", "общая база медиа",
+                                    source="копия базы" if backup.exists() else "уцелевшие строки")])
+        arch.commit()
+        log.warning(f"[целостность] общая база медиа была повреждена: восстановлена ({dict(n)}); повреждённая — в {qdir}")
+        return {"backup": backup.exists(), "rows": dict(n)}
+    finally:
+        for lock in held:
+            release_lock(lock)

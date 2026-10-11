@@ -347,6 +347,40 @@ class IntegrityTest(unittest.TestCase):
         self.assertEqual(res["via"], "download")
         self.assertEqual(final.read_bytes(), b"good-bytes")
 
+    # ------------------------------------------------------------------ databases
+    def test_damaged_database_restored_from_its_copy(self) -> None:
+        self.assertTrue(integrity.db_backup_path(self.arch()).exists())       # the first sync made the daily copy
+        self.fake.posts[2]["title"] = "Пост номер 2 (после копии)"
+        self.fake.posts[2]["dateModified"] += 100
+        self.assertEqual(self.sync(), 0)                                     # an edit the copy doesn't have
+        a = self.arch()
+        a.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        page = a.db.execute("PRAGMA page_size").fetchone()[0]
+        root = a.db.execute("SELECT rootpage FROM sqlite_master WHERE name='slices'").fetchone()[0]
+        a.close()
+        p = self.root / ".state" / "state.sqlite"
+        b = bytearray(p.read_bytes())
+        off = (root - 1) * page
+        b[off:off + 12] = b"Z" * 12                                     # a b-tree page header garbled
+        p.write_bytes(bytes(b))
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(len(list((self.root / ".state" / "quarantine").rglob("state.sqlite"))), 1)
+        self.assertEqual(self.q("SELECT COUNT(*) AS n FROM posts")[0]["n"], 8)
+        self.assertEqual(self.q("SELECT COUNT(*) AS n FROM my_comments")[0]["n"], 38)
+        self.assertEqual(len(self.q("SELECT * FROM history WHERE kind='post' AND item_id=2 AND event='edit'")), 1)
+        self.assertTrue(any(f["kind"] == "database" for f in self.log()))
+
+    def test_backup_once_a_day(self) -> None:
+        a = self.arch()
+        try:
+            first = a.get_meta(integrity.META_DB_BACKUP)
+            self.assertFalse(integrity.backup_dbs(a))                        # taken today already
+            self.assertTrue(integrity.backup_dbs(a, force=True))
+            self.assertGreaterEqual(a.get_meta(integrity.META_DB_BACKUP), first)
+            self.assertTrue(integrity.store_backup_path(self.lib).exists())
+        finally:
+            a.close()
+
     # ------------------------------------------------------------------ helpers
     def drop_copies(self, rel: str, view: bool = True) -> None:
         """No mirror (and no pages) to restore `rel` from."""

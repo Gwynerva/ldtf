@@ -245,7 +245,7 @@ class Syncer:
             if self.check_only and not self.db_has_repairs():
                 for st in ("profile", *STAGES):
                     self.report(st, status="skipped")
-                integrity.finish(self.arch, ())
+                integrity.finish(self.arch, (), checked=self.check is not None)
                 log.info("Проверка целостности завершена: скачивать с DTF ничего не нужно.")
                 return code
             self.network_ran = True
@@ -268,7 +268,7 @@ class Syncer:
                 self.stats["integrity"] = self.check.summary()
             self.arch.set_meta(META_LAST_SYNC, {"ts": self.run_ts, "finished": now_ts(),
                                              "stages": sorted(self.only), "stats": self.stats})
-            integrity.finish(self.arch, self.only)
+            integrity.finish(self.arch, self.only, checked=self.check is not None)
             if self.site:
                 log.warning(f"Изменения на DTF: пропало {site_summary(self.site)} — в архиве сохранены прежние версии.")
             log.info("Синхронизация завершена.")
@@ -296,7 +296,7 @@ class Syncer:
             pool.shutdown(wait=False, cancel_futures=True)
             mpool.shutdown(wait=False, cancel_futures=True)
             _drain([pool, mpool], 15.0)  # requests still on the wire finish before the lock is released
-            db.commit()
+            self.arch.commit()   # (a restored database is a new connection: not `db`)
         return code
 
     # ------------------------------------------------------------------ integrity
@@ -305,11 +305,20 @@ class Syncer:
         the rest (the stages below pick them up). A failure of the check itself never stops the sync: damaged files
         are not overwritten anyway (read_raw)."""
         self.report("integrity", status="running")
+
+        def check() -> integrity.Check:
+            return integrity.Check(self.arch, mode="full" if self.verify == "full" else "quick",
+                                   media=self.media != "off" or self.verify == "full",
+                                   report=lambda **f: self.report("integrity", status="running", **f),
+                                   cancel=self.check_cancel).run()
         try:
-            self.check = integrity.Check(self.arch, mode="full" if self.verify == "full" else "quick",
-                                         media=self.media != "off" or self.verify == "full",
-                                         report=lambda **f: self.report("integrity", status="running", **f),
-                                         cancel=self.check_cancel).run()
+            try:
+                self.check = check()
+            except DbDamaged as e:   # a broken database: restored from its daily copy, then checked again
+                log.error(f"[целостность] база {'архива' if e.schema == 'main' else 'медиа'} повреждена: {e}")
+                self.report("integrity", status="running", phase="restore")
+                (integrity.recover_db if e.schema == "main" else integrity.recover_store)(self.arch)
+                self.check = check()
         except (DbDamaged, Cancelled, KeyboardInterrupt):
             raise
         except Exception as e:  # noqa: BLE001
@@ -1288,7 +1297,8 @@ def _pid_alive(pid: int) -> bool:
 
 # ---------------------------------------------------------------------- status
 MEDIA_STATES = {"done": "скачано", "pending": "ждут загрузки", "error": "не скачались", "missing": "удалены на DTF"}
-THREAD_STATES = {"ok": "загружено", "gone": "пост удалён на DTF", "error": "не загрузились"}
+THREAD_STATES = {"ok": "загружено", "gone": "пост удалён на DTF", "error": "не загрузились",
+                 "damaged": "ждут восстановления"}
 
 
 def status(arch: Archive) -> str:
@@ -1313,8 +1323,15 @@ def status(arch: Archive) -> str:
     lines.append("")
     n_perr = one("SELECT COUNT(*) FROM posts WHERE content_status='error' OR tree_status='error'")
     n_ok = one("SELECT COUNT(*) FROM posts WHERE content_status='ok'")
+    n_dmg = one("SELECT COUNT(*) FROM repairs")
     lines.append(f"Посты: {num(one('SELECT COUNT(*) FROM posts'))}, загружено {num(n_ok)}"
                  + (f", с ошибкой {n_perr}" if n_perr else ""))
+    chk = arch.get_meta(integrity.META_CHECK)
+    if chk:
+        lines.append(f"Проверка целостности: {ts_human(chk['ts'])}, " + (
+            "всё в порядке" if not chk.get("problems") else
+            f"найдено {chk['problems']}, восстановлено {chk.get('restored', 0)}, утрачено {chk.get('lost', 0)}")
+            + (f"; ждут загрузки с DTF: {num(n_dmg)}" if n_dmg else ""))
     lost_p = one("SELECT COUNT(*) FROM posts WHERE site_state IS NOT NULL")
     lost_c = one("SELECT COUNT(*) FROM my_comments WHERE site_state IS NOT NULL")
     if lost_p or lost_c:
