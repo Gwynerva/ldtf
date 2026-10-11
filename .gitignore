@@ -18,3 +18,6 @@ promo/
 # release builds (tools/build_release.py) and the in-app updater's work folder
 dist/
 .update/
+
+# LDTF.exe built by CI or by hand (tools/build_release.py --exe-only)
+build/

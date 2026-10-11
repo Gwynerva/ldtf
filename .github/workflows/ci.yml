@@ -26,6 +26,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Unit tests (stdlib only, no network)
         run: python -X utf8 -m unittest discover -s tests -v
+      - name: LDTF.exe builds (the launcher and the window, against the WebView2 SDK)
+        if: runner.os == 'Windows'
+        run: python -X utf8 tools/build_release.py --exe-only build/exe --out build
 
   docker:
     name: docker image (smoke)

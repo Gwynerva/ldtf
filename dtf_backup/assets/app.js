@@ -15,11 +15,16 @@
   // ---- theme (the initial value is applied by an inline script in <head>)
   var themeMeta = document.querySelector('meta[name="theme-color"]');
   function syncThemeColor() { if (themeMeta) themeMeta.content = getComputedStyle(document.body).backgroundColor; }
-  syncThemeColor();
+  // LDTF's own window (LDTF.exe, WebView2): its title bar follows the page's theme
+  function windowTheme() {
+    var w = window.chrome && window.chrome.webview;
+    if (w) try { w.postMessage("theme:" + (root.getAttribute("data-theme") === "dark" ? "dark" : "light")); } catch (e) {}
+  }
+  syncThemeColor(); windowTheme();
   document.addEventListener("click", function (e) {
     if (!e.target.closest || !e.target.closest(".theme-btn")) return;
     var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-    root.setAttribute("data-theme", next); store("dtf-theme", next); syncThemeColor();
+    root.setAttribute("data-theme", next); store("dtf-theme", next); syncThemeColor(); windowTheme();
   });
 
   // ---- app bar: a stronger shadow once the page is scrolled

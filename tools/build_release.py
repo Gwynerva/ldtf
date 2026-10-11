@@ -4,8 +4,9 @@
     python tools/build_release.py --runtime runtime  # an existing embedded Python instead of the download
     python tools/build_release.py --worktree         # the working tree (uncommitted changes too) - for local tests
 
-The zip holds one folder, LDTF/: LDTF.exe (the launcher, tools/launcher/LDTF.cs built with csc.exe of .NET Framework 4,
-Windows only), runtime/ (the embeddable Python with the app folder on its path), the app (git archive: .gitattributes
+The zip holds one folder, LDTF/: LDTF.exe (the launcher and the app's window, tools/launcher/LDTF.cs built with csc.exe
+of .NET Framework 4, Windows only), webview2/ (the WebView2 SDK the window uses: from NuGet, checked by its sha256),
+runtime/ (the embeddable Python with the app folder on its path), the app (git archive: .gitattributes
 export-ignore keeps tests, tools and the Docker files out), .mcp.json (the MCP server for agents started in the folder)
 and release.json — what the in-app updater manages:
 {version, platform, python, runtime (fingerprint), files (top-level entries)}.
@@ -33,6 +34,14 @@ PYTHON = "3.14.8"   # the embeddable Python of the release; the hash was taken f
 PYTHON_SHA256 = "a93abe456ab01bd96d7a085b3cdb6566b3063f4241360d114142fbdb07f0a310"
 PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON}/python-{PYTHON}-embed-amd64.zip"
 PLATFORM = "windows-x64"
+# the WebView2 SDK of LDTF's window (BSD license, kept as webview2/LICENSE.txt); the hash was taken from nuget.org
+WEBVIEW2 = "1.0.4191.47"
+WEBVIEW2_SHA256 = "f492bbf547d0da329553b6727435b677579b1e9f91cc9e4a1ad029366d5f23d0"
+WEBVIEW2_URL = f"https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/{WEBVIEW2}/microsoft.web.webview2.{WEBVIEW2}.nupkg"
+WEBVIEW2_FILES = {"lib/net462/Microsoft.Web.WebView2.Core.dll": "Microsoft.Web.WebView2.Core.dll",
+                  "lib/net462/Microsoft.Web.WebView2.WinForms.dll": "Microsoft.Web.WebView2.WinForms.dll",
+                  "runtimes/win-x64/native/WebView2Loader.dll": "WebView2Loader.dll",
+                  "LICENSE.txt": "LICENSE.txt"}
 CSC = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
 PTH = """python{v}.zip
 .
@@ -107,7 +116,26 @@ def fingerprint(folder: Path) -> str:
     return h.hexdigest()[:16]
 
 
+def webview2(dest: Path, cache: Path) -> None:
+    """webview2/: what LDTF.exe's window needs of the WebView2 SDK (the Runtime itself is part of Windows 10/11)."""
+    pkg = cache / f"microsoft.web.webview2.{WEBVIEW2}.nupkg"
+    if not pkg.exists():
+        print(f"скачиваю {WEBVIEW2_URL}")
+        cache.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(WEBVIEW2_URL, timeout=120) as r:
+            pkg.write_bytes(r.read())
+    digest = hashlib.sha256(pkg.read_bytes()).hexdigest()
+    if digest != WEBVIEW2_SHA256:
+        pkg.unlink()
+        raise SystemExit(f"{pkg.name}: sha256 {digest}, ожидался {WEBVIEW2_SHA256}")
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(pkg) as z:
+        for src, name in WEBVIEW2_FILES.items():
+            (dest / name).write_bytes(z.read(src))
+
+
 def launcher(dest: Path, ver: str, tmp: Path) -> None:
+    """LDTF.exe, compiled against webview2/ (which must already be in `dest`)."""
     if not CSC.exists():
         raise SystemExit(f"нет {CSC}: LDTF.exe собирается в Windows (csc.exe из .NET Framework 4)")
     info = tmp / "AssemblyInfo.cs"
@@ -121,8 +149,11 @@ def launcher(dest: Path, ver: str, tmp: Path) -> None:
         f'[assembly: AssemblyCopyright("© {_dt.date.today().year} Gwynerva, MIT")]\n'
         f'[assembly: AssemblyVersion("{v4}")]\n[assembly: AssemblyFileVersion("{v4}")]\n'
         f'[assembly: AssemblyInformationalVersion("{ver}")]\n', encoding="utf-8")
+    wv = dest / "webview2"
     cmd = [str(CSC), "/nologo", "/target:winexe", "/platform:anycpu", "/optimize+", "/codepage:65001",
            f"/win32icon:{ROOT / 'dtf_backup' / 'assets' / 'brand' / 'ldtf.ico'}", f"/out:{dest / 'LDTF.exe'}",
+           "/reference:System.Windows.Forms.dll", "/reference:System.Drawing.dll",
+           f"/reference:{wv / 'Microsoft.Web.WebView2.Core.dll'}", f"/reference:{wv / 'Microsoft.Web.WebView2.WinForms.dll'}",
            str(ROOT / "tools" / "launcher" / "LDTF.cs"), str(info)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
@@ -139,6 +170,7 @@ def build(args: argparse.Namespace) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     app_files(app, args.worktree)
     pyver = runtime(app / "runtime", Path(args.runtime).resolve() if args.runtime else None, out)
+    webview2(app / "webview2", out)
     launcher(app, ver, stage)
     (app / ".mcp.json").write_text(json.dumps(MCP_JSON, indent=2) + "\n", encoding="utf-8")
     files = sorted(p.name for p in app.iterdir())
@@ -163,7 +195,16 @@ def main() -> None:
     ap.add_argument("--runtime", help="папка встроенного Python вместо скачивания с python.org")
     ap.add_argument("--worktree", action="store_true", help="файлы рабочей копии (с незакоммиченными), а не HEAD")
     ap.add_argument("--out", default=str(ROOT / "dist"), help="куда положить zip и SHA256SUMS (по умолчанию dist/)")
-    build(ap.parse_args())
+    ap.add_argument("--exe-only", metavar="DIR", help="только собрать LDTF.exe (и webview2/) в папку DIR — для проверки")
+    args = ap.parse_args()
+    if args.exe_only:
+        d = Path(args.exe_only).resolve()
+        webview2(d / "webview2", Path(args.out).resolve())
+        launcher(d, version(), d)
+        (d / "AssemblyInfo.cs").unlink(missing_ok=True)
+        print(d / "LDTF.exe")
+        return
+    build(args)
 
 
 if __name__ == "__main__":

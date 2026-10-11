@@ -117,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     common(pa, user=False)
     pa.add_argument("--port", type=int, default=None,
                     help=f"порт (по умолчанию {DEFAULT_PORT} или следующий свободный; заданный явно — ровно он)")
-    pa.add_argument("--background", action="store_true", help="без открытия браузера (автозапуск с Windows)")
+    pa.add_argument("--background", action="store_true", help="без открытия окна (автозапуск с Windows)")
+    pa.add_argument("--show", action="store_true", help="открыть окно и с --background (запуск после обновления)")
 
     pv = sub.add_parser("serve", help="запустить LDTF в консоли (без трея)")
     common(pv, user=False)
@@ -183,9 +184,18 @@ def main(argv: list[str] | None = None) -> int:
         return run(args.root)
 
     if args.cmd == "app":
-        setup_logging(None, args.verbose, app_log=args.root / ".state" / "app.log")
-        from .desktop import run_app
-        return run_app(args.root, args.port, background=args.background)
+        try:
+            setup_logging(None, args.verbose, app_log=args.root / ".state" / "app.log")
+        except OSError as e:   # a folder LDTF can't write to: the app says it below
+            setup_logging(None, args.verbose)
+            log.warning(f"журнал app.log недоступен: {e}")
+        from .desktop import run_app, startup_failed
+        try:
+            return run_app(args.root, args.port, background=args.background, show=args.show)
+        except Exception as e:  # noqa: BLE001 - a start that fails must say why (pythonw has no console)
+            log.exception("[app] ошибка при запуске")
+            return startup_failed(f"LDTF не запустился: {type(e).__name__}: {e}\n\nПодробности — в журнале "
+                                  f"{args.root / '.state' / 'app.log'}")
 
     if args.cmd == "serve":
         setup_logging(None, args.verbose, app_log=args.root / ".state" / "app.log")

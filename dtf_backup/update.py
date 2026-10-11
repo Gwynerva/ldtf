@@ -332,8 +332,10 @@ def take_result() -> dict | None:
 
 
 def restart_args(library: Path, port: int | None) -> list[str]:
-    """How this app was started, for the new version: LDTF.exe --background [--root] [--port]."""
-    out = ["--background"]
+    """How this app was started, for the new version: LDTF.exe --background [--show] [--root] [--port] (--show: its
+    window was open — it closes with this app, the new version opens it again)."""
+    from .window import window_pid
+    out = ["--background"] + (["--show"] if window_pid() else [])
     if library.resolve() != (APP_ROOT / "archive").resolve():
         out += ["--root", str(library)]
     if port:

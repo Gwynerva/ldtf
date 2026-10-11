@@ -88,6 +88,21 @@ class Helper:
             time.sleep(0.3)
         self.log(f"старая версия завершилась (PID {pid})")
 
+    def wait_window(self) -> None:
+        """LDTF's window (LDTF.exe --window) closes by itself once the old app is gone; its LDTF.exe and webview2/ must
+        not be in use while they are replaced."""
+        from .window import window_pid
+        deadline = time.time() + 15
+        pid = window_pid(self.root)
+        while pid and self.alive(pid):
+            if time.time() > deadline:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=30)
+                    time.sleep(1)
+                self.log(f"окно LDTF (PID {pid}) закрыто принудительно")
+                return
+            time.sleep(0.3)
+
     def swap(self) -> None:
         self.backup.mkdir(parents=True, exist_ok=True)
         runtime_changed = bool(self.p["runtime_changed"])
@@ -191,6 +206,7 @@ class Helper:
         self.log(f"обновление {self.p['old_version']} → {self.p['new_version']}")
         try:
             self.wait_old()
+            self.wait_window()
             self.swap()
             self.start(self.root / "LDTF.exe", self.p["args"])
             if self.wait_new():

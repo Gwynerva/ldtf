@@ -13,6 +13,7 @@ import urllib.parse
 from typing import TYPE_CHECKING, Any, Callable
 
 from .. import __version__, config
+from .. import window
 from .. import winintegration as win
 from ..api import is_not_found
 from ..guard import ACCEPTABLE, account_problem, site_summary
@@ -554,7 +555,10 @@ def app_settings_page(app: "App", notice: str = FLASH) -> str:
                       setting("Запускать вместе с Windows", "LDTF тихо стартует в трее после входа в систему; "
                               "синхронизации идут по расписанию.", switch("autostart", state in win.OWN_ENTRY))
                       + f'<div data-region="autostart">{autostart_note(state)}</div>'
-                      + setting("Открывать браузер при запуске", "Когда LDTF запускают вручную.",
+                      + (setting("Открывать в отдельном окне", "Своё окно LDTF вместо вкладки в браузере. Ссылки "
+                                 "на DTF и другие сайты открываются в браузере.", switch("app_window", s["app_window"]))
+                         if window.launcher() else "")
+                      + setting("Показывать LDTF при запуске", "Когда LDTF запускают вручную (не автозапуском).",
                                 switch("open_browser", s["open_browser"]))
                       + '<div class="setting"><span class="setting-t"><span class="field-l">Ярлыки с иконкой LDTF</span>'
                         '<span class="field-h">Запуск без консольного окна.</span></span><span class="btn-row">'

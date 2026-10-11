@@ -834,7 +834,7 @@ def find_running(library: Path, port: int = DEFAULT_PORT) -> dict | None:
         pass
     ping = _ping(port)
     if ping and ping.get("library") == lib:
-        return {"port": port, "url": f"http://127.0.0.1:{port}/"}
+        return {"port": port, "url": f"http://127.0.0.1:{port}/", "pid": ping.get("pid")}
     return None
 
 

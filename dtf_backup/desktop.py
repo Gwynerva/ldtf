@@ -1,25 +1,44 @@
 """`dtf-backup app`: LDTF as a desktop app — server in the background, icon in the Windows tray.
 
 Without a tray (not Windows, or the tray failed) it behaves like `serve`: a console app stopped with Ctrl+C.
-A second start opens the browser on the running instance (or does nothing with --background).
+The pages open in LDTF's own window (window.py; the browser where there is none). A second start shows the running
+instance (or does nothing with --background). A start that fails says why in a message box (pythonw has no console)
+and ends with REPORTED, so LDTF.exe doesn't say it again.
 """
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
-import webbrowser
 from pathlib import Path
 from typing import Any
 
 from . import DEFAULT_PORT, __version__
+from . import window
+from .appsettings import load_app_settings
 from .guard import site_summary
 from .integrity import META_CHECK
 from .scheduler import human_when
 from .state import META_LAST_SYNC, META_SYNC_ATTEMPT, read_meta
 from .util import log
 from .web.jobs import BLOCKED, DONE, ERROR, PRIORITY_REASONS, RUNNING, RUNNING_TITLES
-from .web.server import Runtime, find_running, port_problem
+from .web.server import Runtime, check_writable, find_running, port_problem
+
+REPORTED = 3   # the exit code of a start that failed and said why (tools/launcher/LDTF.cs: Launcher.REPORTED)
+
+
+def startup_failed(message: str) -> int:
+    """The app could not start: the log, and a message box when there is no console to see it in."""
+    log.error(f"[app] не запустился: {message}")
+    if os.name == "nt" and sys.stdout is None:   # pythonw
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, message, "LDTF", 0x10)   # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+    return REPORTED
 from .web.ui import Links
 
 
@@ -57,26 +76,30 @@ def notice(job: Any, attempt: dict | None, site: dict | None) -> tuple[str, str]
     return None
 
 
-def run_app(library: Path, port: int | None = None, background: bool = False) -> int:
+def run_app(library: Path, port: int | None = None, background: bool = False, show: bool = False) -> int:
+    """`show`: open the window even with --background (the start after an update, when a window was open)."""
     running = find_running(library, port or DEFAULT_PORT)
     if running:
-        if not background:
-            webbrowser.open(running["url"])
+        if not background or show:
+            window.show(running["url"], running.get("pid"), load_app_settings(library).get("app_window", True))
         return 0
+    problem = check_writable(library)
+    if problem:
+        return startup_failed(problem)
     try:
         rt = Runtime(library, port, scheduler_delay=120.0 if background else 10.0).start()
     except OSError as e:
-        log.error(port_problem("127.0.0.1", port, e))
-        return 1
+        return startup_failed(port_problem("127.0.0.1", port, e) if e.filename is None else
+                              f"Не удалось запустить LDTF: {e}")
     app = rt.app
     log.info("[app] " + ("запущен в фоне (--background: так его запускает автозапуск с Windows)" if background
                          else "запущен вручную"))
     refresh_autostart()
 
     def open_ui(path: str = "") -> None:
-        webbrowser.open(rt.url + path.lstrip("/"))
+        window.show(rt.url + path.lstrip("/"), os.getpid(), app.settings().get("app_window", True))
 
-    if not background and app.settings().get("open_browser", True):
+    if (not background and app.settings().get("open_browser", True)) or show:
         threading.Timer(0.6, open_ui).start()
 
     from . import tray as traymod

@@ -12,7 +12,8 @@ from .util import write_json
 DEFAULTS: dict[str, Any] = {
     "autosync": True,        # scheduled syncs (a global pause switch)
     "notify": True,          # tray notifications about finished / failed syncs
-    "open_browser": True,    # open the browser when LDTF is started by hand
+    "open_browser": True,    # show LDTF (its window or the browser) when it is started by hand
+    "app_window": True,      # LDTF's own window instead of a browser tab (the Windows release: window.py)
     "update_check": True,    # ask GitHub once a day whether there is a new version (update.py)
 }
 LIMITS: dict[str, tuple] = {}
